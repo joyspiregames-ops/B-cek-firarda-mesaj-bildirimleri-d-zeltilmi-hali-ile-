@@ -1,0 +1,6 @@
+{
+  "name": "Proje Aktarım Merkezi",
+  "description": "Büyük .zip proje arşivlerini parçalı yükleme ile çalışma alanına aktarma ve inceleme aracı.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
