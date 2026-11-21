@@ -3,6 +3,8 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { gameAudio } from './audio';
 import { DEATH_REASONS, ZONES, pickDialogue } from './dialogues';
 import {
+  CAVE_TRAIN_HALF_DEPTH,
+  CAVE_TRAIN_ROOF_Y,
   CockroachRig,
   bakeStaticGroup,
   createBathRampModel,
@@ -12,6 +14,7 @@ import {
   createBiomeTransitionGateModel,
   createBroomModel,
   createButterBlockModel,
+  createCaveTrainModel,
   createCheeseAsteroidModel,
   createCheeseSatelliteModel,
   createCityBusWithRampModel,
@@ -44,12 +47,10 @@ import {
   createLavaRockModel,
   createMagmaArchModel,
   createMahalleSegmentDecor,
-  createMineCartModel,
   createMovingDuckTubModel,
   createMovingIceSledModel,
   createMovingLabBotModel,
   createMovingMagmaCartModel,
-  createMovingMineCartModel,
   createMovingMixerCartModel,
   createMovingSpaceRoverModel,
   createMovingTaxiModel,
@@ -86,6 +87,8 @@ import {
   createUfoSaucerModel,
   createWarpArchModel,
   disposeModelsModuleSingletons,
+  isCaveTrainModelReady,
+  preloadCaveTrainModel,
 } from './models';
 import {
   CHARACTER_GLB_URLS,
@@ -168,8 +171,8 @@ type ObstacleKind =
   | 'tire'
   | 'road_sign'
   | 'phone_roach'
-  | 'mine_cart'
-  | 'moving_mine_cart'
+  | 'moving_train'
+  | 'parked_train'
   | 'earth_boulder'
   | 'crystal_pillar'
   | 'root_arch'
@@ -214,7 +217,7 @@ type ObstacleKind =
 function isMovingObstacleKind(kind: ObstacleKind): boolean {
   return (
     kind === 'moving_taxi' ||
-    kind === 'moving_mine_cart' ||
+    kind === 'moving_train' ||
     kind === 'moving_ice_sled' ||
     kind === 'moving_magma_cart' ||
     kind === 'moving_mixer_cart' ||
@@ -450,6 +453,8 @@ export class RunnerEngine {
   private compiledPoolKeys = new Set<string>();
   private compiledBiomeGroups = new Set<ZoneId>();
   private prewarmedZoneVoices = new Set<ZoneId>(['mahalle_caddesi']);
+  private caveTrainPreloadStarted = false;
+  private caveTrainPoolWarmed = false;
   private lastLookaheadStepMs = 0;
   private loopYieldTimerId = 0;
   private portraitCache: Partial<Record<SkinId, string>> = {};
@@ -636,6 +641,10 @@ export class RunnerEngine {
   // Spawners
   private nextSpawnZ = -42;
   private nextTrafficWaveZ = -90;
+  private reservedMovingLane: number | null = null;
+  private reservedMovingUntilWorldDist = 0;
+  private nextMovingExpressWorldDist = 18;
+  private reservedMovingZoneId: ZoneId | null = null;
   private dialogueTimer = 5.0;
   private lastDialogueId = '';
   private hudThrottle = 0;
@@ -1147,7 +1156,6 @@ export class RunnerEngine {
       'cone',
       'dumpster',
       'tire',
-      'mine_cart',
       'earth_boulder',
       'crystal_pillar',
       'ice_wall',
@@ -1194,8 +1202,8 @@ export class RunnerEngine {
 
     addDeferredZoneTasks('yeralti_magarasi', [
       ['terrain_ramp_yeralti_magarasi', createEarthRampModel],
-      ['mine_cart', createMineCartModel],
-      ['moving_mine_cart', createMovingMineCartModel],
+      ['moving_train', () => createCaveTrainModel(true)],
+      ['parked_train', () => createCaveTrainModel(false)],
       ['earth_boulder', createEarthBoulderModel],
       ['crystal_pillar', createCrystalPillarModel],
       ['root_arch', createRootArchModel],
@@ -1330,6 +1338,11 @@ export class RunnerEngine {
       this.headlamp.visible = false;
       this.renderer.compile(this.scene, this.camera);
 
+      // 3) Prewarm Dark/Flashlight SpotLight permutation (headlamp on) so cave entry & flashlight never hitch
+      this.headlamp.visible = true;
+      this.headlamp.intensity = 74;
+      this.renderer.compile(this.scene, this.camera);
+
       // Restore initial Menu lighting & hide temporary prewarm meshes
       this.menuKeyLight.visible = prevKeyVis;
       this.menuRimLight.visible = prevRimVis;
@@ -1393,9 +1406,52 @@ export class RunnerEngine {
     this.scheduleDeferredBiomePrewarm(450);
   }
 
+  private ensureCaveTrainPoolReady(): void {
+    if (this.caveTrainPreloadStarted) return;
+    this.caveTrainPreloadStarted = true;
+    void preloadCaveTrainModel().then((tmpl) => {
+      if (this.disposed || !tmpl || this.caveTrainPoolWarmed) return;
+      this.caveTrainPoolWarmed = true;
+      for (const [key, isMoving, count] of [
+        ['moving_train', true, 3],
+        ['parked_train', false, 3],
+      ] as const) {
+        const existing = this.obstaclePool.get(key);
+        if (existing) {
+          existing.forEach((m) => this.removeAndDispose(m));
+          existing.length = 0;
+        }
+        const bucket: THREE.Group[] = [];
+        for (let i = 0; i < count; i++) {
+          const trainMesh = createCaveTrainModel(isMoving);
+          bucket.push(trainMesh);
+          if (i === 0 && !this.isSoftwareGl) {
+            const prevLampVis = this.headlamp.visible;
+            const prevLampInt = this.headlamp.intensity;
+            this.headlamp.visible = true;
+            this.headlamp.intensity = Math.max(prevLampInt, 74);
+            void this.renderer.compileAsync(trainMesh, this.camera, this.scene);
+            this.headlamp.visible = prevLampVis;
+            this.headlamp.intensity = prevLampInt;
+          }
+        }
+        this.obstaclePool.set(key, bucket);
+        this.compiledPoolKeys.add(key);
+      }
+    });
+  }
+
   private buildOneDeferredObstacleTask(taskIndex = 0): boolean {
     while (taskIndex < this.deferredObstacleTasks.length) {
       const task = this.deferredObstacleTasks[taskIndex];
+      if (
+        (task.key === 'moving_train' || task.key === 'parked_train') &&
+        !isCaveTrainModelReady()
+      ) {
+        this.ensureCaveTrainPoolReady();
+        taskIndex++;
+        continue;
+      }
       let bucket = this.obstaclePool.get(task.key);
       if (!bucket) {
         bucket = [];
@@ -1410,7 +1466,17 @@ export class RunnerEngine {
       if (!this.compiledPoolKeys.has(task.key)) {
         this.compiledPoolKeys.add(task.key);
         if (!this.isSoftwareGl) {
-          void this.renderer.compileAsync(mesh, this.camera, this.scene);
+          if (task.zoneId === 'yeralti_magarasi') {
+            const prevLampVis = this.headlamp.visible;
+            const prevLampInt = this.headlamp.intensity;
+            this.headlamp.visible = true;
+            this.headlamp.intensity = Math.max(prevLampInt, 74);
+            void this.renderer.compileAsync(mesh, this.camera, this.scene);
+            this.headlamp.visible = prevLampVis;
+            this.headlamp.intensity = prevLampInt;
+          } else {
+            void this.renderer.compileAsync(mesh, this.camera, this.scene);
+          }
         }
       }
       if (bucket.length >= task.targetCopies) {
@@ -1437,6 +1503,7 @@ export class RunnerEngine {
         this.scheduleDeferredBiomePrewarm(600);
         return;
       }
+      this.ensureCaveTrainPoolReady();
       this.buildOneDeferredObstacleTask(0);
       if (this.deferredObstacleTasks.length > 0) {
         this.scheduleDeferredBiomePrewarm(95);
@@ -1453,8 +1520,14 @@ export class RunnerEngine {
       this.contextLost ||
       this.backgroundSuspended ||
       this.externalSuspended ||
-      remainingToTransition > 460
+      remainingToTransition > 520
     ) {
+      return;
+    }
+    if (upcomingZoneId === 'yeralti_magarasi') {
+      this.ensureCaveTrainPoolReady();
+    }
+    if (remainingToTransition > 460) {
       return;
     }
     const nowMs = performance.now();
@@ -1470,7 +1543,17 @@ export class RunnerEngine {
         if (!this.compiledBiomeGroups.has(upcomingZoneId)) {
           this.compiledBiomeGroups.add(upcomingZoneId);
           if (!this.isSoftwareGl) {
-            void this.renderer.compileAsync(built, this.camera, this.scene);
+            if (upcomingZoneId === 'yeralti_magarasi') {
+              const prevLampVis = this.headlamp.visible;
+              const prevLampInt = this.headlamp.intensity;
+              this.headlamp.visible = true;
+              this.headlamp.intensity = Math.max(prevLampInt, 74);
+              void this.renderer.compileAsync(built, this.camera, this.scene);
+              this.headlamp.visible = prevLampVis;
+              this.headlamp.intensity = prevLampInt;
+            } else {
+              void this.renderer.compileAsync(built, this.camera, this.scene);
+            }
           }
         }
         this.lastLookaheadStepMs = nowMs;
@@ -1480,7 +1563,11 @@ export class RunnerEngine {
 
     // 2) Pre-build upcoming biome obstacle templates 1 copy at a time so spawn never misses pool
     if (remainingToTransition <= 420 && this.deferredObstacleTasks.length > 0) {
-      const idx = this.deferredObstacleTasks.findIndex((t) => t.zoneId === upcomingZoneId);
+      const idx = this.deferredObstacleTasks.findIndex(
+        (t) =>
+          t.zoneId === upcomingZoneId &&
+          !((t.key === 'moving_train' || t.key === 'parked_train') && !isCaveTrainModelReady()),
+      );
       if (idx >= 0 && this.buildOneDeferredObstacleTask(idx)) {
         this.lastLookaheadStepMs = nowMs;
         return;
@@ -3302,6 +3389,10 @@ export class RunnerEngine {
 
     this.nextSpawnZ = -42;
     this.nextTrafficWaveZ = -90;
+    this.reservedMovingLane = null;
+    this.reservedMovingUntilWorldDist = 0;
+    this.nextMovingExpressWorldDist = 18;
+    this.reservedMovingZoneId = null;
     this.dialogueTimer = 3.2;
 
     const z0 = ZONES[0];
@@ -3807,6 +3898,7 @@ export class RunnerEngine {
 
   private getEarthWindowForWorldDist(worldDist: number): {
     inEarth: boolean;
+    stageIdx: number;
     descentStart: number;
     descentEnd: number;
     stairStart: number;
@@ -3819,6 +3911,7 @@ export class RunnerEngine {
       if (worldDist >= ec.descentStart && worldDist < ec.stairEnd) {
         return {
           inEarth: true,
+          stageIdx: s,
           descentStart: ec.descentStart,
           descentEnd: ec.descentEnd,
           stairStart: ec.stairStart,
@@ -3863,7 +3956,7 @@ export class RunnerEngine {
   private getFlightHoverOffset(worldDist: number): number {
     const ew = this.getEarthWindowForWorldDist(worldDist);
     const skyH = 9.6;
-    const tunnelH = 4.6;
+    const tunnelH = 5.45;
     if (ew) {
       return tunnelH;
     }
@@ -4073,6 +4166,8 @@ export class RunnerEngine {
       spawnWorldDist > 200 &&
       (distInZone >= ZONE_DISTANCE - 32 || distInZone <= 22);
     if (onTunnelSlope || nearGateBoundary) {
+      this.reservedMovingLane = null;
+      this.reservedMovingZoneId = null;
       const safeLane = 1;
       this.spawnCoinLine(safeLane, zStart, 5, 2.2);
       return 16;
@@ -4081,11 +4176,18 @@ export class RunnerEngine {
     const roll = Math.random();
     const safeLane = Math.floor(Math.random() * 3);
     const isCity = zone.id === 'mahalle_caddesi';
+    const isCave = zone.id === 'yeralti_magarasi';
+    if (isCave) {
+      this.ensureCaveTrainPoolReady();
+    }
+    const caveTrainReady = isCave && isCaveTrainModelReady();
 
     const rampKind: ObstacleKind = isCity ? 'bus_ramp' : 'terrain_ramp';
     const heavyKind: ObstacleKind =
       zone.id === 'yeralti_magarasi'
-        ? 'mine_cart'
+        ? Math.random() < 0.55
+          ? 'earth_boulder'
+          : 'crystal_pillar'
         : zone.id === 'buzul_dunyasi'
           ? Math.random() < 0.5
             ? 'ice_wall'
@@ -4165,7 +4267,7 @@ export class RunnerEngine {
                       : 'tire';
     const movingKind: ObstacleKind =
       zone.id === 'yeralti_magarasi'
-        ? 'moving_mine_cart'
+        ? 'moving_train'
         : zone.id === 'buzul_dunyasi'
           ? 'moving_ice_sled'
           : zone.id === 'ates_diyari'
@@ -4184,81 +4286,393 @@ export class RunnerEngine {
       1 + THREE.MathUtils.clamp((this.speed - 28) / (MAX_SPEED - 28), 0, 1) * 0.22;
     const scaleGap = (baseGap: number) => Math.round(baseGap * speedGapScale);
 
-    // 0. Dedicated Straight-Lane Moving Express (never zigzags, never blocks all lanes!)
+    // Dynamic Moving Traffic / Express Train Corridor Scheduler:
+    // Reserves one clean lane for 92m (road) / 106m (cave) ahead before launching an oncoming moving car or train,
+    // guaranteeing full-speed visible oncoming traffic that never gets blocked or brakes behind static obstacles.
+    if (this.reservedMovingLane !== null) {
+      const corridorExpiredByBoundary =
+        this.reservedMovingZoneId !== zone.id ||
+        (isCave ? !ew || spawnWorldDist >= ew.stairStart - 45 : distInZone >= ZONE_DISTANCE - 65);
+      if (corridorExpiredByBoundary) {
+        this.reservedMovingLane = null;
+        this.reservedMovingZoneId = null;
+      } else if (spawnWorldDist >= this.reservedMovingUntilWorldDist) {
+        const reservedLane = this.reservedMovingLane;
+        this.reservedMovingLane = null;
+        this.reservedMovingZoneId = null;
+        const vSpeed = isCave ? 16.2 : 14.0;
+        const zExpress = isCave ? zStart - 7.8 : zStart - 3;
+        const caveSafe = !isCave || this.isCaveMovingTrainSpawnSafe(zExpress);
+        if (caveSafe) {
+          const fwdRange = this.getVehicleClearanceForward(zExpress, vSpeed);
+          if (
+            this.isLaneCorridorClearForVehicle(reservedLane, zExpress, fwdRange + 4, 16) &&
+            !this.wouldMovingVehicleBlockAllLanes(reservedLane, zExpress, vSpeed)
+          ) {
+            this.clearLaneCoinsAndPowerups(
+              reservedLane,
+              zExpress - (isCave ? CAVE_TRAIN_HALF_DEPTH + 3 : 10),
+              zExpress + fwdRange,
+            );
+            this.spawnObstacle(movingKind, reservedLane, zExpress, zone.id);
+            gameAudio.playTrafficWarning();
+            const guideLane = (reservedLane + 1) % 3;
+            this.spawnCoinLine(guideLane, zStart + 1, 5, 2.2);
+            const thirdLane = (reservedLane + 2) % 3;
+            if (
+              Math.random() < 0.5 &&
+              this.isLaneObstacleWindowFree(thirdLane, zStart - 2.5, zStart + 1.5, 1.8)
+            ) {
+              this.spawnObstacle(lowKind, thirdLane, zStart - 1, zone.id);
+            } else if (
+              Math.random() < 0.45 &&
+              this.isLaneObstacleWindowFree(thirdLane, zStart - 5, zStart - 1, 1.5)
+            ) {
+              this.spawnRandomPowerup(thirdLane, zStart - 3, zone.isDark);
+            }
+            this.nextMovingExpressWorldDist =
+              spawnWorldDist +
+              (isCave ? 45 + Math.random() * 30 : 48 + Math.random() * 28);
+            return scaleGap(isCave ? 32 : 24);
+          }
+        }
+        this.nextMovingExpressWorldDist = spawnWorldDist + 20;
+      }
+    } else if (spawnWorldDist >= this.nextMovingExpressWorldDist) {
+      const canStartReservation = isCave
+        ? caveTrainReady &&
+          ew !== null &&
+          spawnWorldDist >= ew.descentEnd + 55 &&
+          spawnWorldDist <= ew.stairStart - 150
+        : distInZone >= 12 && distInZone <= ZONE_DISTANCE - 155;
+      if (canStartReservation) {
+        const preferredStartLanes = [0, 1, 2].filter((l) =>
+          this.isLaneObstacleWindowFree(l, zStart - 8, zStart + 20, 1.5),
+        );
+        const lanePool = preferredStartLanes.length > 0 ? preferredStartLanes : [0, 1, 2];
+        this.reservedMovingLane = lanePool[Math.floor(Math.random() * lanePool.length)];
+        this.reservedMovingZoneId = zone.id;
+        this.reservedMovingUntilWorldDist = spawnWorldDist + (isCave ? 106 : 92);
+      }
+    }
+
+    const laneAllowed = (l: number) => this.reservedMovingLane !== l;
+    const allowedLanes = [0, 1, 2].filter(laneAllowed);
+    const pickAllowedLane = () =>
+      allowedLanes[Math.floor(Math.random() * allowedLanes.length)] ?? 0;
+
+    // Cave Subway Metro Choreography: balanced mix of moving express trains,
+    // sleek industrial boarding ramp + 2-car parked metro train, un-ramped parked trains, spring-pad flights over trains, and cavern hazards!
+    let effectiveRoll = roll;
+    const inCaveTrainSafeWindow =
+      isCave &&
+      caveTrainReady &&
+      ew !== null &&
+      spawnWorldDist >= ew.descentEnd + 24 &&
+      spawnWorldDist <= ew.stairStart - 92;
+    const movingTrainSafe =
+      inCaveTrainSafeWindow && this.isCaveMovingTrainSpawnSafe(zStart - 7.8);
+
+    if (inCaveTrainSafeWindow) {
+      // A) ~28% Oncoming Moving Express Metro Train on a guaranteed clear rail corridor
+      if (
+        this.reservedMovingLane === null &&
+        this.distance > 35 &&
+        movingTrainSafe &&
+        roll < 0.28
+      ) {
+        const zTrain = zStart - 7.8;
+        const fwdRange = this.getVehicleClearanceForward(zTrain, 16.2);
+        const candidateLanes = allowedLanes.filter(
+          (l) =>
+            this.isLaneCorridorClearForVehicle(l, zTrain, fwdRange + 4, 16) &&
+            !this.wouldMovingVehicleBlockAllLanes(l, zTrain, 16.2),
+        );
+        if (candidateLanes.length > 0) {
+          const trafficLane =
+            candidateLanes[Math.floor(Math.random() * candidateLanes.length)];
+          this.clearLaneCoinsAndPowerups(
+            trafficLane,
+            zTrain - CAVE_TRAIN_HALF_DEPTH - 3,
+            zTrain + fwdRange,
+          );
+          this.spawnObstacle('moving_train', trafficLane, zTrain, zone.id);
+          gameAudio.playTrafficWarning();
+          const guideLane = (trafficLane + 1) % 3;
+          this.spawnCoinLine(guideLane, zStart + 1, 5, 2.2);
+          const thirdLane = (trafficLane + 2) % 3;
+          if (
+            Math.random() < 0.5 &&
+            this.isLaneObstacleWindowFree(thirdLane, zStart - 2.5, zStart + 1.5, 2.0)
+          ) {
+            this.spawnObstacle(lowKind, thirdLane, zStart - 1, zone.id);
+          } else if (
+            Math.random() < 0.45 &&
+            this.isLaneObstacleWindowFree(thirdLane, zStart - 5, zStart - 1, 1.5)
+          ) {
+            this.spawnRandomPowerup(thirdLane, zStart - 3, zone.isDark);
+          }
+          return scaleGap(32);
+        }
+      }
+
+      // B) ~22% Sleek Subway Boarding Ramp + Coupled 2-Car Parked Metro Train Rooftop Run (exact flush edge-to-edge join at zRamp - 2.74)
+      if (roll < 0.5) {
+        const zRamp = zStart - 1.5;
+        const zTrain = zRamp - (2.5 + CAVE_TRAIN_HALF_DEPTH);
+        const candidateRampLanes = allowedLanes.filter((l) =>
+          this.isLaneObstacleWindowFree(
+            l,
+            zTrain - CAVE_TRAIN_HALF_DEPTH - 0.5,
+            zRamp + 3.25,
+            2.5,
+          ),
+        );
+        if (candidateRampLanes.length > 0) {
+          const rampLane =
+            candidateRampLanes[Math.floor(Math.random() * candidateRampLanes.length)];
+          this.clearLaneCoinsAndPowerups(
+            rampLane,
+            zTrain - CAVE_TRAIN_HALF_DEPTH - 0.5,
+            zRamp + 3.25,
+          );
+          this.spawnObstacle('terrain_ramp', rampLane, zRamp, zone.id);
+          this.spawnObstacle('parked_train', rampLane, zTrain, zone.id);
+
+          // Guiding coins smoothly up the slope and across both coupled train cars
+          this.spawnCoinLine(rampLane, zStart + 0.8, 1, 1.0, 0.9);
+          this.spawnCoinLine(rampLane, zStart - 0.9, 1, 1.0, 2.0);
+          this.spawnCoinLine(rampLane, zStart - 2.6, 1, 1.0, 3.15);
+          this.spawnCoinLine(rampLane, zStart - 4.4, 7, 2.15, CAVE_TRAIN_ROOF_Y + 0.35);
+
+          const sideLane = (rampLane + 1) % 3;
+          const openLane = (rampLane + 2) % 3;
+          let placedSideMoving = false;
+          if (laneAllowed(sideLane) && movingTrainSafe && Math.random() < 0.45) {
+            const zSideTrain = zStart - 7.8;
+            const fwdRange = this.getVehicleClearanceForward(zSideTrain, 16.2);
+            if (
+              this.isCaveMovingTrainSpawnSafe(zSideTrain) &&
+              this.isLaneCorridorClearForVehicle(sideLane, zSideTrain, fwdRange + 4, 16) &&
+              !this.wouldMovingVehicleBlockAllLanes(sideLane, zSideTrain, 16.2)
+            ) {
+              this.clearLaneCoinsAndPowerups(
+                sideLane,
+                zSideTrain - CAVE_TRAIN_HALF_DEPTH - 3,
+                zSideTrain + fwdRange,
+              );
+              this.spawnObstacle('moving_train', sideLane, zSideTrain, zone.id);
+              placedSideMoving = true;
+            }
+          }
+          if (
+            !placedSideMoving &&
+            laneAllowed(sideLane) &&
+            this.isLaneObstacleWindowFree(sideLane, zStart - 5.5, zStart - 2.5, 2.0)
+          ) {
+            this.spawnObstacle(
+              Math.random() < 0.55 ? mediumKind : lowKind,
+              sideLane,
+              zStart - 4,
+              zone.id,
+            );
+          }
+          if (
+            Math.random() < 0.45 &&
+            this.isLaneObstacleWindowFree(openLane, zStart - 7, zStart - 3, 1.5)
+          ) {
+            this.spawnRandomPowerup(openLane, zStart - 5, zone.isDark);
+          }
+          return scaleGap(40);
+        }
+      }
+
+      // C) ~18% Standalone 2-Car Parked Train WITHOUT a Ramp (balanced variety!)
+      if (roll < 0.68) {
+        const zTrain = zStart - 7.4;
+        const candidateTrainLanes = allowedLanes.filter((l) =>
+          this.isLaneObstacleWindowFree(
+            l,
+            zTrain - CAVE_TRAIN_HALF_DEPTH - 0.5,
+            zTrain + CAVE_TRAIN_HALF_DEPTH + 0.5,
+            2.4,
+          ),
+        );
+        if (candidateTrainLanes.length > 0) {
+          const trainLane =
+            candidateTrainLanes[Math.floor(Math.random() * candidateTrainLanes.length)];
+          this.clearLaneCoinsAndPowerups(
+            trainLane,
+            zTrain - CAVE_TRAIN_HALF_DEPTH - 0.5,
+            zTrain + CAVE_TRAIN_HALF_DEPTH + 0.5,
+          );
+          this.spawnObstacle('parked_train', trainLane, zTrain, zone.id);
+
+          const sideLane = (trainLane + 1) % 3;
+          const openLane = (trainLane + 2) % 3;
+          let placedSideMoving = false;
+          if (laneAllowed(sideLane) && movingTrainSafe && Math.random() < 0.48) {
+            const zSideTrain = zStart - 7.8;
+            const fwdRange = this.getVehicleClearanceForward(zSideTrain, 16.2);
+            if (
+              this.isCaveMovingTrainSpawnSafe(zSideTrain) &&
+              this.isLaneCorridorClearForVehicle(sideLane, zSideTrain, fwdRange + 4, 16) &&
+              !this.wouldMovingVehicleBlockAllLanes(sideLane, zSideTrain, 16.2)
+            ) {
+              this.clearLaneCoinsAndPowerups(
+                sideLane,
+                zSideTrain - CAVE_TRAIN_HALF_DEPTH - 3,
+                zSideTrain + fwdRange,
+              );
+              this.spawnObstacle('moving_train', sideLane, zSideTrain, zone.id);
+              placedSideMoving = true;
+            }
+          }
+          if (
+            !placedSideMoving &&
+            laneAllowed(sideLane) &&
+            Math.random() < 0.65 &&
+            this.isLaneObstacleWindowFree(sideLane, zStart - 5.5, zStart - 2.5, 2.0)
+          ) {
+            this.spawnObstacle(
+              Math.random() < 0.5 ? archKind : lowKind,
+              sideLane,
+              zStart - 4,
+              zone.id,
+            );
+          }
+          this.spawnCoinLine(openLane, zStart, 6, 2.2);
+          return scaleGap(33);
+        }
+      }
+
+      // D) Re-normalize remaining ~32% across [0.20 .. 1.0) so Spring Pad flights, arches, boulders & powerups all trigger cleanly!
+      effectiveRoll = 0.2 + ((Math.max(0.68, roll) - 0.68) / 0.32) * 0.8;
+    }
+
+    // 0. Dedicated Straight-Lane Moving Express (non-cave biomes, or fallback)
     if (
-      this.distance > 65 &&
-      distInZone < ZONE_DISTANCE - 95 &&
-      Math.random() < (isCity ? 0.22 : 0.18)
+      this.reservedMovingLane === null &&
+      !isCave &&
+      this.distance > 18 &&
+      distInZone < ZONE_DISTANCE - 60 &&
+      Math.random() < (isCity ? 0.34 : 0.22)
     ) {
-      const fwdRange = this.getVehicleClearanceForward(zStart - 2);
-      const candidateLanes = [0, 1, 2].filter(
+      const fwdRange = this.getVehicleClearanceForward(zStart - 2, 14.0);
+      const candidateLanes = allowedLanes.filter(
         (l) =>
-          this.isLaneCorridorClearForVehicle(l, zStart - 2, fwdRange, 14) &&
-          !this.wouldMovingVehicleBlockAllLanes(l, zStart - 2, fwdRange),
+          this.isLaneCorridorClearForVehicle(l, zStart - 2, fwdRange, 16) &&
+          !this.wouldMovingVehicleBlockAllLanes(l, zStart - 2, 14.0),
       );
       if (candidateLanes.length > 0) {
         const trafficLane =
           candidateLanes[Math.floor(Math.random() * candidateLanes.length)];
-        this.spawnObstacle(movingKind, trafficLane, zStart - 2, zone.id);
+        this.clearLaneCoinsAndPowerups(trafficLane, zStart - 10, zStart - 2 + fwdRange);
+        this.spawnObstacle(movingKind, trafficLane, zStart - 3, zone.id);
+        gameAudio.playTrafficWarning();
         const guideLane = (trafficLane + 1) % 3;
         this.spawnCoinLine(guideLane, zStart + 1, 5, 2.2);
         const thirdLane = (trafficLane + 2) % 3;
-        if (Math.random() < 0.6) {
+        if (
+          Math.random() < 0.55 &&
+          this.isLaneObstacleWindowFree(thirdLane, zStart - 2.5, zStart + 0.5, 1.5)
+        ) {
           this.spawnObstacle(lowKind, thirdLane, zStart - 1, zone.id);
-        } else if (Math.random() < 0.45) {
+        } else if (
+          Math.random() < 0.45 &&
+          this.isLaneObstacleWindowFree(thirdLane, zStart - 4.5, zStart - 1.5, 1.5)
+        ) {
           this.spawnRandomPowerup(thirdLane, zStart - 3, zone.isDark);
         }
         return scaleGap(24);
       }
     }
 
-    // 1. Climbable Ramp + Roof Run Coins
-    if (roll < 0.2) {
-      const rampLane = Math.floor(Math.random() * 3);
-      this.spawnObstacle(rampKind, rampLane, zStart - 2, zone.id);
-      this.spawnCoinLine(rampLane, zStart - 1.1, 4, 1.35, BUS_ROOF_Y + 0.3);
+    // 1. Climbable Ramp + Roof Run Coins (non-cave biomes only; cave ramps always attach to parked trains!)
+    if (!isCave && effectiveRoll < 0.2) {
+      const rampLane = pickAllowedLane();
+      if (
+        laneAllowed(rampLane) &&
+        this.isLaneObstacleWindowFree(rampLane, zStart - 6.5, zStart + 2.5, 2.0)
+      ) {
+        this.clearLaneCoinsAndPowerups(rampLane, zStart - 6.5, zStart + 2.5);
+        this.spawnObstacle(rampKind, rampLane, zStart - 2, zone.id);
+        this.spawnCoinLine(rampLane, zStart - 1.1, 4, 1.35, BUS_ROOF_Y + 0.32);
+      }
       const otherLane = (rampLane + 1) % 3;
-      const otherHeavy = this.pickZoneHeavyKind(
-        isCity,
-        movingKind,
-        heavyKind,
-        otherLane,
-        zStart - 3,
-      );
-      this.spawnObstacle(otherHeavy, otherLane, zStart - 3, zone.id);
-      if (Math.random() < 0.45) {
+      if (
+        laneAllowed(otherLane) &&
+        this.isLaneObstacleWindowFree(otherLane, zStart - 5.5, zStart - 0.5, 1.8)
+      ) {
+        const otherHeavy = this.pickZoneHeavyKind(
+          isCity,
+          movingKind,
+          heavyKind,
+          otherLane,
+          zStart - 3,
+        );
+        this.spawnObstacle(otherHeavy, otherLane, zStart - 3, zone.id);
+      }
+      if (
+        Math.random() < 0.45 &&
+        this.isLaneObstacleWindowFree((rampLane + 2) % 3, zStart - 3.5, zStart - 0.5, 1.2)
+      ) {
         this.spawnRandomPowerup((rampLane + 2) % 3, zStart - 2, zone.isDark);
       }
       return scaleGap(26);
     }
 
-    // 2. Super Spring Launch Pad -> Parabolic Sky Coin Arc + Safe Landing Zone!
-    if (roll < 0.34) {
-      const padLane = Math.floor(Math.random() * 3);
-      this.spawnObstacle('spring_pad', padLane, zStart, zone.id);
-      this.spawnHighSkyArc(padLane, zStart);
+    // 2. Super Spring Launch Pad -> Parabolic Sky Coin Arc + Safe Landing Zone (soars right over a 2-car metro train in the cave!)
+    if (effectiveRoll < 0.37) {
+      const padLane = pickAllowedLane();
+      let soaredOverTrain = false;
+      if (
+        laneAllowed(padLane) &&
+        this.isLaneObstacleWindowFree(padLane, zStart - 2.0, zStart + 2.0, 2.0)
+      ) {
+        this.spawnObstacle('spring_pad', padLane, zStart, zone.id);
+        this.spawnHighSkyArc(padLane, zStart);
+        if (
+          inCaveTrainSafeWindow &&
+          Math.random() < 0.65 &&
+          this.isLaneObstacleWindowFree(padLane, zStart - 23.0, zStart - 6.0, 2.0)
+        ) {
+          this.clearLaneCoinsAndPowerups(padLane, zStart - 22.5, zStart - 6.0);
+          this.spawnObstacle('parked_train', padLane, zStart - 14.5, zone.id);
+          soaredOverTrain = true;
+        }
+      }
       const sideLane = (padLane + 1) % 3;
-      this.spawnObstacle(mediumKind, sideLane, zStart, zone.id);
-      return Math.round(48 * (1 + (speedGapScale - 1) * 0.55));
+      if (
+        laneAllowed(sideLane) &&
+        this.isLaneObstacleWindowFree(sideLane, zStart - 2.0, zStart + 2.0, 2.0)
+      ) {
+        this.spawnObstacle(mediumKind, sideLane, zStart, zone.id);
+      }
+      return Math.round((soaredOverTrain ? 56 : 48) * (1 + (speedGapScale - 1) * 0.55));
     }
 
     // 3. Double lane blockers
-    if (roll < 0.54) {
+    if (effectiveRoll < 0.56) {
+      const effectiveSafeLane =
+        this.reservedMovingLane !== null ? pickAllowedLane() : safeLane;
       for (let lane = 0; lane < 3; lane++) {
-        if (lane !== safeLane) {
-          const laneHeavy = this.pickZoneHeavyKind(
-            isCity,
-            movingKind,
-            heavyKind,
-            lane,
-            zStart,
-          );
-          this.spawnObstacle(
-            Math.random() < 0.55 ? laneHeavy : mediumKind,
-            lane,
-            zStart,
-            zone.id,
-          );
+        if (!laneAllowed(lane)) {
+          this.spawnCoinLine(lane, zStart + 2, 4, 2.3);
+          continue;
+        }
+        if (lane !== effectiveSafeLane) {
+          const laneHeavy = isCave
+            ? heavyKind
+            : this.pickZoneHeavyKind(isCity, movingKind, heavyKind, lane, zStart);
+          const pick = Math.random() < 0.55 ? laneHeavy : mediumKind;
+          if (this.isLaneObstacleWindowFree(lane, zStart - 2.2, zStart + 2.2, 2.0)) {
+            if (isMovingObstacleKind(pick)) {
+              const fwd = this.getVehicleClearanceForward(zStart, 14.0);
+              this.clearLaneCoinsAndPowerups(lane, zStart - 4, zStart + fwd);
+            }
+            this.spawnObstacle(pick, lane, zStart, zone.id);
+          }
         } else {
           this.spawnCoinLine(lane, zStart + 2, 5, 2.3);
         }
@@ -4267,31 +4681,55 @@ export class RunnerEngine {
     }
 
     // 4. Overhead Arch (Roll Under) + Low Trip/Roll Hazard
-    if (roll < 0.72) {
-      const archLane = Math.floor(Math.random() * 3);
-      this.spawnObstacle(archKind, archLane, zStart, zone.id);
-      this.spawnCoinLine(archLane, zStart + 1.5, 4, 2.2, 0.25);
+    if (effectiveRoll < 0.74) {
+      const archLane = pickAllowedLane();
+      if (
+        laneAllowed(archLane) &&
+        this.isLaneObstacleWindowFree(archLane, zStart - 1.5, zStart + 1.5, 1.8)
+      ) {
+        this.spawnObstacle(archKind, archLane, zStart, zone.id);
+        this.spawnCoinLine(archLane, zStart + 1.5, 4, 2.2, 0.25);
+      }
 
       const otherLane = (archLane + 1) % 3;
-      this.spawnObstacle(lowKind, otherLane, zStart, zone.id);
+      if (
+        laneAllowed(otherLane) &&
+        this.isLaneObstacleWindowFree(otherLane, zStart - 1.5, zStart + 1.5, 1.8)
+      ) {
+        this.spawnObstacle(lowKind, otherLane, zStart, zone.id);
+      }
       return scaleGap(20);
     }
 
     // 5. Hazard / Phone Roach + Heavy Blocker
-    if (roll < 0.87) {
-      const altLane = Math.floor(Math.random() * 3);
-      this.spawnObstacle(isCity ? 'phone_roach' : lowKind, altLane, zStart, zone.id);
+    if (effectiveRoll < 0.88) {
+      const altLane = pickAllowedLane();
+      const lowPick = isCity ? 'phone_roach' : lowKind;
+      if (
+        laneAllowed(altLane) &&
+        this.isLaneObstacleWindowFree(altLane, zStart - 1.5, zStart + 1.5, 1.8)
+      ) {
+        this.spawnObstacle(lowPick, altLane, zStart, zone.id);
+      }
       const thirdLane = (altLane + 2) % 3;
-      const thirdHeavy = this.pickZoneHeavyKind(
-        isCity,
-        movingKind,
-        heavyKind,
-        thirdLane,
-        zStart - 2,
-      );
-      this.spawnObstacle(thirdHeavy, thirdLane, zStart - 2, zone.id);
+      if (
+        laneAllowed(thirdLane) &&
+        this.isLaneObstacleWindowFree(thirdLane, zStart - 4.2, zStart + 0.2, 2.0)
+      ) {
+        const thirdHeavy = isCave
+          ? heavyKind
+          : this.pickZoneHeavyKind(isCity, movingKind, heavyKind, thirdLane, zStart - 2);
+        if (isMovingObstacleKind(thirdHeavy)) {
+          const fwd = this.getVehicleClearanceForward(zStart - 2, 14.0);
+          this.clearLaneCoinsAndPowerups(thirdLane, zStart - 6, zStart - 2 + fwd);
+        }
+        this.spawnObstacle(thirdHeavy, thirdLane, zStart - 2, zone.id);
+      }
       this.spawnCoinLine((altLane + 1) % 3, zStart, 5, 2.2);
-      if (Math.random() < 0.4) {
+      if (
+        Math.random() < 0.4 &&
+        this.isLaneObstacleWindowFree((altLane + 1) % 3, zStart - 13.5, zStart - 10.5, 1.2)
+      ) {
         this.spawnRandomPowerup((altLane + 1) % 3, zStart - 12.0, zone.isDark);
       }
       return scaleGap(22);
@@ -4300,16 +4738,83 @@ export class RunnerEngine {
     // 6. Coin Run + Powerup
     const coinLane = Math.floor(Math.random() * 3);
     this.spawnCoinLine(coinLane, zStart, 7, 2.1);
-    if (Math.random() < 0.65) {
+    if (
+      Math.random() < 0.65 &&
+      this.isLaneObstacleWindowFree((coinLane + 1) % 3, zStart - 5.5, zStart - 2.5, 1.2)
+    ) {
       this.spawnRandomPowerup((coinLane + 1) % 3, zStart - 4, zone.isDark);
     }
     return scaleGap(19);
   }
 
-  private getVehicleClearanceForward(z: number): number {
+  private getObstacleRoofY(obs: ActiveObstacle): number {
+    if (obs.kind === 'moving_train' || obs.kind === 'parked_train') {
+      return CAVE_TRAIN_ROOF_Y;
+    }
+    if (
+      obs.kind === 'terrain_ramp' &&
+      obs.poolKey === 'terrain_ramp_yeralti_magarasi'
+    ) {
+      return CAVE_TRAIN_ROOF_Y;
+    }
+    return BUS_ROOF_Y;
+  }
+
+  private getVehicleClearanceForward(z: number, vehicleSpeed = 14.0): number {
     const distToPlayer = Math.max(0, -z);
-    const catchup = distToPlayer * (9.5 / (Math.max(BASE_SPEED, this.speed) + 9.5));
-    return Math.ceil(catchup) + 14;
+    const minPlayerSpeed =
+      vehicleSpeed >= 14.8
+        ? Math.max(18, this.speed * 0.82)
+        : Math.max(BASE_SPEED, this.speed);
+    const catchup =
+      distToPlayer * (vehicleSpeed / (minPlayerSpeed + vehicleSpeed));
+    return Math.ceil(catchup) + (vehicleSpeed >= 14.8 ? 16 : 10);
+  }
+
+  private isLaneObstacleWindowFree(
+    lane: number,
+    zMin: number,
+    zMax: number,
+    padding = 1.6,
+  ): boolean {
+    for (let i = 0; i < this.obstacles.length; i++) {
+      const obs = this.obstacles[i];
+      if (obs.lane !== lane) continue;
+      const obsFront = obs.z + obs.halfDepth;
+      const obsBack = obs.z - obs.halfDepth;
+      if (obsFront > zMin - padding && obsBack < zMax + padding) {
+        return false;
+      }
+      // Never place an obstacle ahead of an oncoming moving vehicle's catchup path
+      if (isMovingObstacleKind(obs.kind) && obsFront <= zMin) {
+        const vSpeed = obs.trafficSpeed ?? (obs.kind === 'moving_train' ? 16.2 : 14.0);
+        const fwd = this.getVehicleClearanceForward(obs.z, vSpeed);
+        const beamMargin = obs.kind === 'moving_train' ? 10 : 0;
+        if (obs.z + fwd + obs.halfDepth + beamMargin > zMin - padding) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  private clearLaneCoinsAndPowerups(lane: number, zMin: number, zMax: number): void {
+    for (let i = this.coins.length - 1; i >= 0; i--) {
+      const coin = this.coins[i];
+      if (coin.isSkyCoin || coin.localY > 1.2 || coin.lane !== lane) continue;
+      if (coin.z >= zMin && coin.z <= zMax) {
+        this.releaseCoin(coin);
+        this.coins.splice(i, 1);
+      }
+    }
+    for (let i = this.powerups.length - 1; i >= 0; i--) {
+      const p = this.powerups[i];
+      if (p.localY !== undefined || p.lane !== lane) continue;
+      if (p.z >= zMin && p.z <= zMax) {
+        this.releasePowerup(p);
+        this.powerups.splice(i, 1);
+      }
+    }
   }
 
   private isLaneCorridorClearForVehicle(
@@ -4326,30 +4831,34 @@ export class RunnerEngine {
         return false;
       }
     }
-    for (let i = 0; i < this.coins.length; i++) {
-      const coin = this.coins[i];
-      if (coin.isSkyCoin || coin.lane !== lane) continue;
-      if (coin.z > z - 2 && coin.z < z + forwardRange) {
-        return false;
-      }
-    }
-    for (let i = 0; i < this.powerups.length; i++) {
-      const p = this.powerups[i];
-      if (p.localY !== undefined || p.lane !== lane) continue;
-      if (p.z > z - 2 && p.z < z + forwardRange) {
-        return false;
-      }
-    }
     return true;
+  }
+
+  private getMovingVehicleMeetWorldDist(z: number, vSpeed: number): number {
+    const playerSpeed = Math.max(BASE_SPEED * 0.9, this.speed * 0.92);
+    const tMeet = Math.max(0, -z) / (playerSpeed + vSpeed);
+    return this.distance + playerSpeed * tMeet;
+  }
+
+  private isCaveMovingTrainSpawnSafe(zTrain: number): boolean {
+    if (!isCaveTrainModelReady()) return false;
+    const trainWorldDist = this.distance + Math.max(0, -zTrain);
+    const ew = this.getEarthWindowForWorldDist(trainWorldDist);
+    if (!ew) return false;
+    if (this.distance < ew.descentEnd - 10) return false;
+    if (trainWorldDist > ew.stairStart - 42) return false;
+    return this.getMovingVehicleMeetWorldDist(zTrain, 16.2) >= ew.descentEnd + 46;
   }
 
   private wouldMovingVehicleBlockAllLanes(
     targetLane: number,
     z: number,
-    forwardRange: number,
+    vSpeed = 14.0,
   ): boolean {
-    const zMin = z - 8;
-    const zMax = Math.min(4, z + forwardRange + 8);
+    const playerSpeed = Math.max(BASE_SPEED, this.speed);
+    const zMeet = z * (playerSpeed / (playerSpeed + vSpeed));
+    const zMin = zMeet - 18;
+    const zMax = Math.min(2, zMeet + 18);
     const otherLanes = [0, 1, 2].filter((l) => l !== targetLane);
     const laneA = otherLanes[0];
     const laneB = otherLanes[1];
@@ -4382,15 +4891,16 @@ export class RunnerEngine {
     lane: number,
     z: number,
   ): ObstacleKind {
-    const moveChance = isCity ? 0.55 : 0.34;
-    if (this.distance <= 75 || Math.random() >= moveChance) return fallbackHeavy;
+    const moveChance = isCity ? 0.68 : 0.42;
+    if (this.distance <= 18 || Math.random() >= moveChance) return fallbackHeavy;
     const worldDist = this.distance + Math.max(0, -z);
     const distInZone = worldDist % ZONE_DISTANCE;
-    if (distInZone >= ZONE_DISTANCE - 95) return fallbackHeavy;
-    const fwdRange = this.getVehicleClearanceForward(z);
+    if (distInZone >= ZONE_DISTANCE - 60) return fallbackHeavy;
+    const vSpeed = movingKind === 'moving_train' ? 16.2 : 14.0;
+    const fwdRange = this.getVehicleClearanceForward(z, vSpeed);
     if (
       !this.isLaneCorridorClearForVehicle(lane, z, fwdRange, 14) ||
-      this.wouldMovingVehicleBlockAllLanes(lane, z, fwdRange)
+      this.wouldMovingVehicleBlockAllLanes(lane, z, vSpeed)
     ) {
       return fallbackHeavy;
     }
@@ -4445,8 +4955,8 @@ export class RunnerEngine {
                       ? createLabRampModel()
                       : createSpaceRampModel(),
         );
-        height = BUS_ROOF_Y;
-        halfDepth = 3.85;
+        height = zoneId === 'yeralti_magarasi' ? CAVE_TRAIN_ROOF_Y : BUS_ROOF_Y;
+        halfDepth = zoneId === 'yeralti_magarasi' ? 3.15 : 3.85;
         break;
       case 'spring_pad':
         mesh = this.acquireObstacle(poolKey, createSpringPadModel);
@@ -4497,15 +5007,17 @@ export class RunnerEngine {
         }
         break;
       }
-      case 'mine_cart':
-        mesh = this.acquireObstacle(poolKey, createMineCartModel);
-        height = 1.65;
-        halfDepth = 1.04;
+      case 'moving_train':
+        mesh = this.acquireObstacle(poolKey, () => createCaveTrainModel(true));
+        height = CAVE_TRAIN_ROOF_Y;
+        halfDepth = CAVE_TRAIN_HALF_DEPTH;
+        halfWidth = 1.1;
         break;
-      case 'moving_mine_cart':
-        mesh = this.acquireObstacle(poolKey, createMovingMineCartModel);
-        height = 1.68;
-        halfDepth = 1.22;
+      case 'parked_train':
+        mesh = this.acquireObstacle(poolKey, () => createCaveTrainModel(false));
+        height = CAVE_TRAIN_ROOF_Y;
+        halfDepth = CAVE_TRAIN_HALF_DEPTH;
+        halfWidth = 1.1;
         break;
       case 'earth_boulder':
         mesh = this.acquireObstacle(poolKey, createEarthBoulderModel);
@@ -4741,7 +5253,11 @@ export class RunnerEngine {
       z,
       baseY,
       mesh,
-      trafficSpeed: isMovingObstacleKind(kind) ? 9.5 : undefined,
+      trafficSpeed: isMovingObstacleKind(kind)
+        ? kind === 'moving_train'
+          ? 16.2
+          : 14.0
+        : undefined,
       visualX: LANE_X[lane],
       height,
       minY,
@@ -4753,16 +5269,40 @@ export class RunnerEngine {
 
   private spawnTrafficRushWave(z: number): boolean {
     // Only pick lanes clear across the vehicle's actual catchup distance so traffic flows straight & freely without clipping
-    const fwdRange = this.getVehicleClearanceForward(z);
+    const fwdRange = this.getVehicleClearanceForward(z, 14.0);
     const clearLanes = [0, 1, 2].filter(
       (l) =>
+        this.reservedMovingLane !== l &&
         this.isLaneCorridorClearForVehicle(l, z, fwdRange, 14) &&
-        !this.wouldMovingVehicleBlockAllLanes(l, z, fwdRange),
+        !this.wouldMovingVehicleBlockAllLanes(l, z, 14.0),
     );
     if (clearLanes.length === 0) return false;
 
     const chosenLane = clearLanes[Math.floor(Math.random() * clearLanes.length)];
+    this.clearLaneCoinsAndPowerups(chosenLane, z - 8, z + fwdRange);
     this.spawnObstacle('moving_taxi', chosenLane, z, 'mahalle_caddesi');
+    gameAudio.playTrafficWarning();
+    return true;
+  }
+
+  private spawnCaveTrainWave(z: number): boolean {
+    if (!this.isCaveMovingTrainSpawnSafe(z)) return false;
+    const fwdRange = this.getVehicleClearanceForward(z, 16.2);
+    const clearLanes = [0, 1, 2].filter(
+      (l) =>
+        this.reservedMovingLane !== l &&
+        this.isLaneCorridorClearForVehicle(l, z, fwdRange + 4, 16) &&
+        !this.wouldMovingVehicleBlockAllLanes(l, z, 16.2),
+    );
+    if (clearLanes.length === 0) return false;
+
+    const chosenLane = clearLanes[Math.floor(Math.random() * clearLanes.length)];
+    this.clearLaneCoinsAndPowerups(
+      chosenLane,
+      z - CAVE_TRAIN_HALF_DEPTH - 3,
+      z + fwdRange,
+    );
+    this.spawnObstacle('moving_train', chosenLane, z, 'yeralti_magarasi');
     gameAudio.playTrafficWarning();
     return true;
   }
@@ -4774,9 +5314,22 @@ export class RunnerEngine {
     step: number,
     localY = 0.2,
   ): void {
+    const checkGroundOverlap = localY < 1.1;
     for (let i = 0; i < count; i++) {
-      const mesh = this.acquireCoin();
       const z = zStart - i * step;
+      if (checkGroundOverlap) {
+        let hitsObstacle = false;
+        for (let j = 0; j < this.obstacles.length; j++) {
+          const obs = this.obstacles[j];
+          if (obs.lane !== lane || obs.minY >= 1.1) continue;
+          if (z >= obs.z - obs.halfDepth - 0.9 && z <= obs.z + obs.halfDepth + 0.9) {
+            hitsObstacle = true;
+            break;
+          }
+        }
+        if (hitsObstacle) continue;
+      }
+      const mesh = this.acquireCoin();
       const baseY = this.getWorldGroundY(this.distance + Math.max(0, -z));
       const y = baseY + localY;
       mesh.position.set(LANE_X[lane], y, z);
@@ -4788,7 +5341,7 @@ export class RunnerEngine {
   private getSkyFlightCoinY(worldDist: number): number {
     // Level aerial floor inside tunnel vs crisp level sky height outdoors (no sagging transitions!)
     if (this.getEarthWindowForWorldDist(worldDist)) {
-      return TUNNEL_DEPTH + 4.35;
+      return TUNNEL_DEPTH + 5.15;
     }
     return 9.35;
   }
@@ -5019,9 +5572,10 @@ export class RunnerEngine {
     }
   }
 
-  private handleVisibilityChange = (): void => {
-    this.backgroundSuspended = document.hidden;
-    if (document.hidden) {
+  public setAppBackgrounded(backgrounded: boolean): void {
+    if (this.backgroundSuspended === backgrounded) return;
+    this.backgroundSuspended = backgrounded;
+    if (backgrounded) {
       if (this.phase === 'playing') {
         this.pause(true);
       } else if (this.phase === 'gameover' && this.gameOverDelayTimer > 0) {
@@ -5033,6 +5587,10 @@ export class RunnerEngine {
       gameAudio.resumeFromBackground();
     }
     this.syncLoopState();
+  }
+
+  private handleVisibilityChange = (): void => {
+    this.setAppBackgrounded(document.hidden);
   };
 
   private startLoop(): void {
@@ -5126,7 +5684,7 @@ export class RunnerEngine {
         if (this.playerGlb.getState() !== 'idle' && this.playerGlb.getState() !== 'tap') {
           this.playerGlb.setState('idle', 0.18, 1);
         }
-        this.playerGlb.update(dt);
+        this.playerGlb.update(dt, { clampFloor: true });
       } else if (this.playerRig) {
         this.playerRig.bodyGroup.rotation.set(0, 0, 0);
         this.playerRig.headGroup.rotation.y = Math.sin(t * 1.4) * 0.12 + tapFactor * 0.22;
@@ -5163,7 +5721,17 @@ export class RunnerEngine {
         this.activePlayerRoot.position.set(this.playerX, this.playerY, 0);
         this.playerShadow.position.set(this.playerX, crashFloorY + 0.02, 0);
       }
-      this.playerGlb?.update(dt);
+      const crashWorldY = this.getWorldGroundY(this.distance);
+      const crashSlopeTan =
+        crashFloorY <= crashWorldY + 0.08
+          ? (this.getWorldGroundY(this.distance + 0.9) -
+              this.getWorldGroundY(Math.max(0, this.distance - 0.9))) /
+            1.8
+          : 0;
+      this.playerGlb?.update(dt, {
+        clampFloor: this.playerY <= crashFloorY + 0.08,
+        floorSlopeTan: crashSlopeTan,
+      });
       const sideSign = this.playerX >= 0 ? -1 : 1;
 
       if (this.crashDeathType === 'chaser' && !this.crashSlapImpactDone) {
@@ -5255,7 +5823,10 @@ export class RunnerEngine {
         this.chaserShadow.scale.setScalar(
           Math.max(0.35, 1 - Math.max(0, this.chaserY - crashFloorY) * 0.12),
         );
-        this.chaserGlb.update(dt);
+        this.chaserGlb.update(dt, {
+          clampFloor: this.chaserY <= crashFloorY + 0.08,
+          floorSlopeTan: crashSlopeTan,
+        });
       } else if (this.broomMesh.visible) {
         this.chaserShadow.visible = false;
         this.broomMesh.position.x = THREE.MathUtils.damp(
@@ -5571,18 +6142,29 @@ export class RunnerEngine {
       }
 
       this.nextTrafficWaveZ += dz;
-      const waveWorldDist = this.distance + 118;
+      const waveSpawnZ = -162;
+      const waveWorldDist = this.distance - waveSpawnZ;
       const waveZone = ZONES[this.getZoneIndexForWorldDist(waveWorldDist)];
       const waveDistInZone = waveWorldDist % ZONE_DISTANCE;
+      const waveInZoneSafe =
+        waveZone.id === 'yeralti_magarasi'
+          ? this.isCaveMovingTrainSpawnSafe(waveSpawnZ)
+          : waveZone.id === 'mahalle_caddesi' &&
+            waveDistInZone >= 24 &&
+            waveDistInZone <= ZONE_DISTANCE - 95;
       if (
-        waveZone.id === 'mahalle_caddesi' &&
-        waveDistInZone >= 35 &&
-        waveDistInZone <= ZONE_DISTANCE - 95 &&
-        this.distance > 70 &&
+        waveInZoneSafe &&
+        this.reservedMovingLane === null &&
+        this.distance > 22 &&
         this.nextTrafficWaveZ > -112
       ) {
-        const spawned = this.spawnTrafficRushWave(-118);
-        this.nextTrafficWaveZ = spawned ? -142 - Math.random() * 24 : -120;
+        const spawned =
+          waveZone.id === 'yeralti_magarasi'
+            ? this.spawnCaveTrainWave(waveSpawnZ)
+            : this.spawnTrafficRushWave(waveSpawnZ);
+        this.nextTrafficWaveZ = spawned
+          ? (waveZone.id === 'yeralti_magarasi' ? -112 : -104) - Math.random() * 22
+          : -118;
       }
 
       const stepFloorY = this.getWorldGroundY(this.distance);
@@ -5628,16 +6210,23 @@ export class RunnerEngine {
           const obsX = obs.visualX ?? LANE_X[obs.lane];
           const laneDist = Math.abs(this.playerX - obsX);
           const localZ = -obs.z;
-          if (laneDist < 1.08 && localZ >= -3.65 && localZ <= 4.0) {
+          const isCaveRamp = obs.poolKey === 'terrain_ramp_yeralti_magarasi';
+          const roofY = this.getObstacleRoofY(obs);
+          const frontZ = isCaveRamp ? 3.15 : 3.95;
+          const slopeTopZ = isCaveRamp ? -2.2 : 1.4;
+          const rampRun = isCaveRamp ? 5.35 : 2.55;
+          const backZ = isCaveRamp ? -2.82 : -3.65;
+          const laneReach = isCaveRamp ? 1.16 : 1.08;
+          if (laneDist < laneReach && localZ >= backZ && localZ <= frontZ + 0.05) {
             const surfaceY =
               obs.baseY +
-              (localZ >= 1.4
-                ? THREE.MathUtils.clamp((3.95 - localZ) / 2.55, 0, 1) * BUS_ROOF_Y
-                : BUS_ROOF_Y);
-            const isOnFrontSlope = localZ >= 1.25;
+              (localZ >= slopeTopZ
+                ? THREE.MathUtils.clamp((frontZ - localZ) / rampRun, 0, 1) * roofY
+                : roofY);
+            const isOnFrontSlope = localZ >= slopeTopZ - 0.1;
             if (isOnFrontSlope || this.playerY >= surfaceY - 0.92) {
               groundHeight = Math.max(groundHeight, surfaceY);
-              if (localZ < 1.4 && !obs.roofCredited) {
+              if (localZ < slopeTopZ && !obs.roofCredited) {
                 obs.roofCredited = true;
                 this.bumpCombo(30);
               }
@@ -5646,15 +6235,46 @@ export class RunnerEngine {
           if (stepChaserActive) {
             const chaserLaneDist = Math.abs(chaserX - obsX);
             const chaserLocalZ = chaserZ - obs.z;
-            if (chaserLaneDist < 1.08 && chaserLocalZ >= -3.65 && chaserLocalZ <= 4.0) {
+            if (
+              chaserLaneDist < laneReach &&
+              chaserLocalZ >= backZ &&
+              chaserLocalZ <= frontZ + 0.05
+            ) {
               const chaserSurfaceY =
                 obs.baseY +
-                (chaserLocalZ >= 1.4
-                  ? THREE.MathUtils.clamp((3.95 - chaserLocalZ) / 2.55, 0, 1) * BUS_ROOF_Y
-                  : BUS_ROOF_Y);
-              if (chaserLocalZ >= 1.15 || this.chaserY >= chaserSurfaceY - 0.95) {
+                (chaserLocalZ >= slopeTopZ
+                  ? THREE.MathUtils.clamp((frontZ - chaserLocalZ) / rampRun, 0, 1) * roofY
+                  : roofY);
+              if (chaserLocalZ >= slopeTopZ - 0.2 || this.chaserY >= chaserSurfaceY - 0.95) {
                 chaserGround = Math.max(chaserGround, chaserSurfaceY);
               }
+            }
+          }
+        } else if (obs.kind === 'parked_train') {
+          const obsX = obs.visualX ?? LANE_X[obs.lane];
+          const laneDist = Math.abs(this.playerX - obsX);
+          const surfaceY = obs.baseY + CAVE_TRAIN_ROOF_Y;
+          // Subway Surfers rule: normal ground jump (2.96m) cannot reach 3.45m train roof (-0.22 -> 3.23m catch);
+          // only ramps, super springs, Jetpack descent, or another train roof can mount!
+          if (
+            laneDist < 1.16 &&
+            Math.abs(obs.z) <= obs.halfDepth + 0.35 &&
+            this.playerY >= surfaceY - 0.22
+          ) {
+            groundHeight = Math.max(groundHeight, surfaceY);
+            if (!obs.roofCredited) {
+              obs.roofCredited = true;
+              this.bumpCombo(35);
+            }
+          }
+          if (stepChaserActive) {
+            const chaserLaneDist = Math.abs(chaserX - obsX);
+            if (
+              chaserLaneDist < 1.16 &&
+              Math.abs(chaserZ - obs.z) <= obs.halfDepth + 0.35 &&
+              this.chaserY >= surfaceY - 0.24
+            ) {
+              chaserGround = Math.max(chaserGround, surfaceY);
             }
           }
         }
@@ -5687,36 +6307,69 @@ export class RunnerEngine {
       for (let v = 0; v < movingVehicles.length; v++) {
         const obs = movingVehicles[v];
         const laneX = LANE_X[obs.lane];
-        let vSpeed = obs.trafficSpeed ?? 9.5;
+        const baseCruiseSpeed = obs.kind === 'moving_train' ? 16.2 : 14.0;
+        let vSpeed = obs.trafficSpeed ?? baseCruiseSpeed;
+
+        let trainTouchingDescentRamp = false;
+        if (obs.kind === 'moving_train') {
+          const trainFrontWorldDist = this.distance - (obs.z + obs.halfDepth + 3.0);
+          if (
+            obs.z < -obs.halfDepth &&
+            this.getWorldGroundY(trainFrontWorldDist) > obs.baseY + 0.15
+          ) {
+            trainTouchingDescentRamp = true;
+          }
+          const surfaceY = obs.baseY + CAVE_TRAIN_ROOF_Y;
+          if (
+            Math.abs(this.playerX - laneX) < 1.16 &&
+            Math.abs(obs.z) <= obs.halfDepth + 0.35 &&
+            this.playerY >= surfaceY - 0.22
+          ) {
+            groundHeight = Math.max(groundHeight, surfaceY);
+            if (!obs.roofCredited) {
+              obs.roofCredited = true;
+              this.bumpCombo(45);
+            }
+          }
+        }
 
         let blocker: ActiveObstacle | null = null;
         for (let j = 0; j < this.obstacles.length; j++) {
           const other = this.obstacles[j];
           if (other.id === obs.id || other.lane !== obs.lane) continue;
-          if (other.z > obs.z - 0.4 && (!blocker || other.z < blocker.z)) {
+          if (
+            other.z + other.halfDepth > obs.z + obs.halfDepth &&
+            (!blocker || other.z < blocker.z)
+          ) {
             blocker = other;
           }
         }
 
-        let desiredSpeed = 9.5;
+        let desiredSpeed = trainTouchingDescentRamp ? 0 : baseCruiseSpeed;
         let blockerSpeed = 0;
         if (blocker) {
           const gap = blocker.z - blocker.halfDepth - (obs.z + obs.halfDepth);
           blockerSpeed = isMovingObstacleKind(blocker.kind)
-            ? (blocker.trafficSpeed ?? 9.5)
+            ? (blocker.trafficSpeed ?? 14.0)
             : 0;
           const safeGap = 2.8;
           const brakeDist = 16.0;
           if (gap <= safeGap) {
-            desiredSpeed = Math.min(9.5, blockerSpeed);
+            desiredSpeed = Math.min(desiredSpeed, blockerSpeed);
           } else if (gap < brakeDist) {
             const ratio = (gap - safeGap) / (brakeDist - safeGap);
-            desiredSpeed = blockerSpeed + (9.5 - blockerSpeed) * (ratio * ratio);
+            desiredSpeed = Math.min(
+              desiredSpeed,
+              blockerSpeed + (baseCruiseSpeed - blockerSpeed) * (ratio * ratio),
+            );
           }
         }
 
-        const aheadWorldDist = this.distance + Math.max(0, -(obs.z + 4.5));
-        if (this.getWorldGroundY(aheadWorldDist) < obs.baseY - 0.15) {
+        const aheadWorldDist = this.distance - (obs.z + obs.halfDepth + 3.0);
+        if (
+          obs.z < 0 &&
+          Math.abs(this.getWorldGroundY(aheadWorldDist) - obs.baseY) > 0.15
+        ) {
           desiredSpeed = 0;
         }
 
@@ -5746,6 +6399,17 @@ export class RunnerEngine {
         const hoverMesh = obs.mesh.userData.hoverMesh as THREE.Object3D | undefined;
         if (hoverMesh) {
           hoverMesh.position.y = Math.sin(t * 7.0 + obs.id) * 0.06;
+        }
+        const trainHull = obs.mesh.userData.trainHull as THREE.Object3D | undefined;
+        if (trainHull) {
+          const railClatter = vSpeed > 0.5 ? Math.sin(t * 24.0 + obs.id) * 0.008 : 0;
+          trainHull.position.y = railClatter;
+          trainHull.rotation.z = railClatter * 0.45;
+        }
+        const headlightRig = obs.mesh.userData.headlightRig as THREE.Object3D | undefined;
+        if (headlightRig) {
+          const beamPulse = 0.96 + Math.sin(t * 9.0 + obs.id) * 0.05;
+          headlightRig.scale.set(beamPulse, 1, beamPulse);
         }
       }
       this.currentGroundY = groundHeight;
@@ -5887,8 +6551,19 @@ export class RunnerEngine {
         } else if (obs.kind === 'bus_ramp' || obs.kind === 'terrain_ramp') {
           const localZ = -obs.z;
           const prevLaneDist = Math.abs(prevSubX - obsX);
-          if (laneDist < 0.86 && localZ >= -3.4 && localZ < 1.25) {
-            const surfaceY = obs.baseY + BUS_ROOF_Y;
+          const isCaveRamp = obs.poolKey === 'terrain_ramp_yeralti_magarasi';
+          const roofY = this.getObstacleRoofY(obs);
+          const hitMinZ = isCaveRamp ? -2.72 : -3.4;
+          const hitMaxZ = isCaveRamp ? 1.05 : 1.25;
+          const hitHalfW = isCaveRamp ? 0.9 : 0.86;
+          if (laneDist < hitHalfW && localZ >= hitMinZ && localZ < hitMaxZ) {
+            const surfaceY =
+              obs.baseY +
+              (isCaveRamp
+                ? localZ >= -2.2
+                  ? THREE.MathUtils.clamp((3.15 - localZ) / 5.35, 0, 1) * roofY
+                  : roofY
+                : roofY);
             if (
               playerBottom < surfaceY - 0.92 &&
               this.invulnTimer <= 0 &&
@@ -5901,8 +6576,9 @@ export class RunnerEngine {
                 continue;
               }
               const isSideHit =
-                localZ < 1.1 &&
-                (prevLaneDist >= 0.84 || this.prevSafeLane !== obs.lane);
+                localZ < (isCaveRamp ? 0.9 : 1.1) &&
+                (prevLaneDist >= (isCaveRamp ? 0.88 : 0.84) ||
+                  this.prevSafeLane !== obs.lane);
               if (isSideHit) {
                 const sideDir = prevSubX < obsX ? -1 : 1;
                 if (this.stumbleTimer <= 0) {
@@ -5917,8 +6593,12 @@ export class RunnerEngine {
             }
           }
         } else if (inZRange && laneDist < (obs.halfWidth ?? 0.82)) {
+          const isTrainKind =
+            obs.kind === 'moving_train' || obs.kind === 'parked_train';
           let yOverlap = false;
-          if (obs.subBoxes && obs.subBoxes.length > 0) {
+          if (isTrainKind && playerBottom >= obs.baseY + CAVE_TRAIN_ROOF_Y - 0.22) {
+            yOverlap = false;
+          } else if (obs.subBoxes && obs.subBoxes.length > 0) {
             const localZ = -obs.z;
             for (let sb = 0; sb < obs.subBoxes.length; sb++) {
               const box = obs.subBoxes[sb];
@@ -6017,7 +6697,7 @@ export class RunnerEngine {
           }
         }
 
-        if (obs.z > 12) {
+        if (obs.z > Math.max(12, obs.halfDepth + 8)) {
           this.releaseObstacle(obs);
           this.obstacles.splice(i, 1);
         }
@@ -6148,7 +6828,7 @@ export class RunnerEngine {
     if (this.scene.fog instanceof THREE.Fog) {
       const stairTargetFog =
         earthNow && this.distance >= earthNow.stairStart
-          ? upcomingZone.fogColor
+          ? this.getZoneConfigById(this.getZoneIdForStage(earthNow.stageIdx + 1)).fogColor
           : currentZone.fogColor;
       const targetFogHex =
         isFlying && currentZone.id !== 'yeralti_magarasi'
@@ -6298,7 +6978,17 @@ export class RunnerEngine {
         this.chaserShadow.scale.setScalar(
           Math.max(0.35, 1 - Math.max(0, this.chaserY - this.chaserGroundY) * 0.12),
         );
-        this.chaserGlb.update(dt);
+        const chaserDist = Math.max(0, this.distance - this.chaserGlb.root.position.z);
+        const chaserSlopeTan =
+          this.chaserGrounded && this.chaserY <= this.getWorldGroundY(chaserDist) + 0.08
+            ? (this.getWorldGroundY(chaserDist + 0.9) -
+                this.getWorldGroundY(Math.max(0, chaserDist - 0.9))) /
+              1.8
+            : 0;
+        this.chaserGlb.update(dt, {
+          clampFloor: this.chaserGrounded,
+          floorSlopeTan: chaserSlopeTan,
+        });
       } else {
         this.chaserGlb.root.visible = false;
         this.chaserShadow.visible = false;
@@ -6583,7 +7273,16 @@ export class RunnerEngine {
           dt,
         );
       }
-      this.playerGlb.update(dt);
+      const runSlopeTan =
+        this.isGrounded && !isFlying && this.playerY <= floorY + 0.08
+          ? (this.getWorldGroundY(this.distance + 0.9) -
+              this.getWorldGroundY(Math.max(0, this.distance - 0.9))) /
+            1.8
+          : 0;
+      this.playerGlb.update(dt, {
+        clampFloor: this.isGrounded && !isFlying && this.longJumpSpinTimer <= 0,
+        floorSlopeTan: runSlopeTan,
+      });
     } else if (this.playerRig && isFlying) {
       // Subway Surfers horizontal superhero Jetpack flight pose with head lifted straight ahead
       this.playerRig.rollPivot.rotation.x = THREE.MathUtils.damp(
@@ -6881,11 +7580,11 @@ export class RunnerEngine {
       this.playerX * (isFlying ? 0.72 : 0.92 + chaseCamPull * 0.05) +
       chaseCamPull * 0.16;
     const targetCamY = isFlying
-      ? this.playerY + (inEarthTunnel ? 4.05 : 4.95)
+      ? this.playerY + (inEarthTunnel ? 3.95 : 4.95)
       : floorY + 3.35 - chaseCamPull * 0.27 + relY * 0.62;
     const targetCamZ = isFlying ? (inEarthTunnel ? 6.25 : 6.85) : 5.25 + chaseCamPull * 1.75;
     const lookTargetY = isFlying
-      ? this.playerY - (inEarthTunnel ? 2.65 : 3.15) + slopeLookOffset
+      ? this.playerY - (inEarthTunnel ? 2.6 : 3.15) + slopeLookOffset
       : floorY + 1.38 - chaseCamPull * 1.35 + relY * 0.48 + slopeLookOffset;
     const lookTargetZ = isFlying ? -11.5 : -16.5;
 
@@ -7073,19 +7772,29 @@ export class RunnerEngine {
     const worldFloorY = this.getWorldGroundY(this.distance);
     let resolvedFloorY = worldFloorY;
     for (const obs of this.obstacles) {
-      if (obs.kind !== 'bus_ramp' && obs.kind !== 'terrain_ramp') continue;
+      const isRoofObs =
+        obs.kind === 'bus_ramp' ||
+        obs.kind === 'terrain_ramp' ||
+        obs.kind === 'moving_train' ||
+        obs.kind === 'parked_train';
+      if (!isRoofObs) continue;
       const obsX = obs.visualX ?? LANE_X[obs.lane];
       const localZ = -obs.z;
-      if (
-        Math.abs(this.playerX - obsX) < 1.05 &&
-        localZ >= -3.6 &&
-        localZ <= 3.9 &&
-        this.playerY >= obs.baseY + BUS_ROOF_Y - 0.25
-      ) {
-        resolvedFloorY = Math.max(resolvedFloorY, obs.baseY + BUS_ROOF_Y);
+      const roofY = this.getObstacleRoofY(obs);
+      const isCaveRamp = obs.poolKey === 'terrain_ramp_yeralti_magarasi';
+      const onFootprint =
+        obs.kind === 'moving_train' || obs.kind === 'parked_train'
+          ? Math.abs(this.playerX - obsX) < 1.16 && Math.abs(obs.z) <= obs.halfDepth + 0.35
+          : Math.abs(this.playerX - obsX) < 1.16 &&
+            localZ >= (isCaveRamp ? -2.82 : -3.65) &&
+            localZ <= (isCaveRamp ? 3.25 : 4.25);
+      const isTrainRoof = obs.kind === 'moving_train' || obs.kind === 'parked_train';
+      if (onFootprint && this.playerY >= obs.baseY + roofY - (isTrainRoof ? 0.24 : 0.55)) {
+        resolvedFloorY = Math.max(resolvedFloorY, obs.baseY + roofY);
       }
     }
     this.crashFloorY = resolvedFloorY;
+    this.playerY = Math.max(this.playerY, resolvedFloorY);
 
     if (sideDir !== 0 && crashedObs) {
       const obsX = crashedObs.visualX ?? LANE_X[crashedObs.lane];
@@ -7097,7 +7806,8 @@ export class RunnerEngine {
     } else if (crashedObs) {
       if (crashedObs.kind === 'bus_ramp' || crashedObs.kind === 'terrain_ramp') {
         const obsX = crashedObs.visualX ?? LANE_X[crashedObs.lane];
-        if (this.playerY < crashedObs.baseY + BUS_ROOF_Y - 0.25) {
+        const roofY = this.getObstacleRoofY(crashedObs);
+        if (this.playerY < crashedObs.baseY + roofY - 0.25) {
           const pushSide =
             crashedObs.lane === 0
               ? 1
@@ -7123,10 +7833,12 @@ export class RunnerEngine {
       const obsX = obs.visualX ?? LANE_X[obs.lane];
       if (Math.abs(this.playerX - obsX) >= 1.32) continue;
       const localZ = -obs.z;
+      const roofY = this.getObstacleRoofY(obs);
+      const isCaveRamp = obs.poolKey === 'terrain_ramp_yeralti_magarasi';
       if (
-        this.playerY < obs.baseY + BUS_ROOF_Y - 0.25 &&
-        localZ >= -3.8 &&
-        localZ <= 4.0
+        this.playerY < obs.baseY + roofY - 0.25 &&
+        localZ >= (isCaveRamp ? -2.95 : -3.8) &&
+        localZ <= (isCaveRamp ? 3.3 : 4.3)
       ) {
         const pushSide =
           obs.lane === 0
@@ -7168,11 +7880,13 @@ export class RunnerEngine {
 
       if (isRamp) {
         // Keep the roof intact if the player died on top of this ramp
+        const roofY = this.getObstacleRoofY(obs);
+        const isCaveRamp = obs.poolKey === 'terrain_ramp_yeralti_magarasi';
         const onThisRoof =
-          this.crashFloorY >= obs.baseY + BUS_ROOF_Y - 0.25 &&
+          this.crashFloorY >= obs.baseY + roofY - 0.25 &&
           Math.abs(this.playerX - obsX) < 1.35 &&
-          -obs.z >= -3.9 &&
-          -obs.z <= 4.1;
+          -obs.z >= (isCaveRamp ? -2.95 : -3.9) &&
+          -obs.z <= (isCaveRamp ? 3.35 : 4.35);
         if (onThisRoof) continue;
         const backClear = hitsChaserX
           ? Math.max(playerBackClear, chaserApproachMaxZ)

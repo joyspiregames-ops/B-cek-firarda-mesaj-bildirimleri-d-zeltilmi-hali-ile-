@@ -77,7 +77,10 @@ export function GameOverOverlay({
         await navigator.clipboard.writeText(shareText);
         setShareMsg(isTr ? 'Skor kopyalandı!' : 'Score copied!');
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return;
+      }
       setShareMsg(isTr ? 'Kopyalanamadı' : 'Copy failed');
     }
     if (shareTimerRef.current !== null) {

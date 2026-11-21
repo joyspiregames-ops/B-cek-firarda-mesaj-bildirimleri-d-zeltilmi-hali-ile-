@@ -976,6 +976,7 @@ function buildClipMap(
       {
         name: 'fall_face',
         stripHorizontal: true,
+        preserveRelativeZ: true,
       },
     ) ?? fallBackClip;
 
@@ -1324,6 +1325,11 @@ export class GlbCharacterController {
   private readonly neckPitchAxis = new THREE.Vector3(1, 0, 0);
   private readonly headPitchAxis = new THREE.Vector3(1, 0, 0);
   private readonly tmpPitchQ = new THREE.Quaternion();
+  private readonly floorBoneChecks: Array<{ bone: THREE.Object3D; clearance: number }> = [];
+  private readonly floorSampleMeshes: Array<{ mesh: THREE.SkinnedMesh; indices: number[] }> = [];
+  private readonly tmpFloorVec = new THREE.Vector3();
+  private readonly tmpInvRootMat = new THREE.Matrix4();
+  private floorLiftY = 0;
   private flyHeadBlend = 0;
   private currentState: GlbAnimState | null = null;
   private currentAction: THREE.AnimationAction | null = null;
@@ -1426,15 +1432,68 @@ export class GlbCharacterController {
       this.actions.set(state, action);
     });
 
-    // Find Mixamo bones for Jetpack & Headlamp attachments
+    // Find Mixamo bones for Jetpack, Headlamp & dynamic floor-clearance clamping
     let spineBone: THREE.Object3D | null = null;
     let neckBone: THREE.Object3D | null = null;
     let headBone: THREE.Object3D | null = null;
+    const footFloorKeys = new Set(['leftfoot', 'lefttoebase', 'rightfoot', 'righttoebase']);
+    const handFloorKeys = new Set(['lefthand', 'righthand']);
+    const bodyFloorClearances: Record<string, number> = {
+      hips: 0.14,
+      spine: 0.14,
+      spine1: 0.15,
+      spine2: 0.16,
+      neck: 0.1,
+      head: 0.14,
+      leftarm: 0.08,
+      rightarm: 0.08,
+      leftforearm: 0.065,
+      rightforearm: 0.065,
+      leftupleg: 0.1,
+      rightupleg: 0.1,
+      leftleg: 0.075,
+      rightleg: 0.075,
+    };
+    const seenFloorKeys = new Set<string>();
+    const tmpFloorBoneWorld = new THREE.Vector3();
+
     cloned.traverse((obj) => {
       if (!spineBone && /Spine2$/i.test(obj.name)) spineBone = obj;
       else if (!spineBone && /Spine1$/i.test(obj.name)) spineBone = obj;
       if (!neckBone && /Neck$/i.test(obj.name)) neckBone = obj;
       if (!headBone && /Head$/i.test(obj.name)) headBone = obj;
+
+      if (obj.name) {
+        const key = getNormalizedBoneKey(obj.name);
+        if (!seenFloorKeys.has(key)) {
+          if (footFloorKeys.has(key) || handFloorKeys.has(key)) {
+            seenFloorKeys.add(key);
+            obj.getWorldPosition(tmpFloorBoneWorld);
+            const clearance = footFloorKeys.has(key)
+              ? THREE.MathUtils.clamp(tmpFloorBoneWorld.y - 0.006, 0.025, 0.13)
+              : 0.055;
+            this.floorBoneChecks.push({ bone: obj, clearance });
+          } else if (bodyFloorClearances[key] !== undefined) {
+            seenFloorKeys.add(key);
+            this.floorBoneChecks.push({
+              bone: obj,
+              clearance: bodyFloorClearances[key],
+            });
+          }
+        }
+      }
+
+      if (obj instanceof THREE.SkinnedMesh && obj.geometry.attributes.position) {
+        const count = obj.geometry.attributes.position.count;
+        const step = Math.max(1, Math.floor(count / 180));
+        const indices: number[] = [];
+        for (let idx = 0; idx < count; idx += step) {
+          indices.push(idx);
+        }
+        if (indices.length > 0) {
+          this.floorSampleMeshes.push({ mesh: obj, indices });
+        }
+      }
     });
 
     this.neckBone = neckBone;
@@ -1685,7 +1744,10 @@ export class GlbCharacterController {
     }
   }
 
-  public update(dt: number): void {
+  public update(
+    dt: number,
+    options?: { clampFloor?: boolean; floorSlopeTan?: number },
+  ): void {
     if (this.currentState === 'tap') {
       this.tapElapsed += dt;
       if (this.tapElapsed >= 1.25) {
@@ -1711,6 +1773,66 @@ export class GlbCharacterController {
         this.headBone.quaternion.multiply(this.tmpPitchQ);
       }
     }
+
+    const shouldClampFloor = Boolean(options?.clampFloor) && this.currentState !== 'fly';
+    if (shouldClampFloor && (this.floorBoneChecks.length > 0 || this.floorSampleMeshes.length > 0)) {
+      const slopeTan = options?.floorSlopeTan ?? 0;
+      const isGroundBodyPose =
+        this.currentState === 'fall_face' ||
+        this.currentState === 'fall_back' ||
+        this.currentState === 'slide';
+      const targetMargin = isGroundBodyPose ? 0.024 : 0.006;
+
+      this.root.updateMatrixWorld(true);
+      this.tmpInvRootMat.copy(this.root.matrixWorld).invert();
+
+      let minRawClearance = Infinity;
+      for (let i = 0; i < this.floorBoneChecks.length; i++) {
+        const entry = this.floorBoneChecks[i];
+        entry.bone.getWorldPosition(this.tmpFloorVec);
+        this.tmpFloorVec.applyMatrix4(this.tmpInvRootMat);
+        const groundAtZ = -this.tmpFloorVec.z * slopeTan;
+        const clearance =
+          this.tmpFloorVec.y - this.floorLiftY - entry.clearance - groundAtZ;
+        if (clearance < minRawClearance) {
+          minRawClearance = clearance;
+        }
+      }
+
+      if (isGroundBodyPose && this.floorSampleMeshes.length > 0) {
+        for (let m = 0; m < this.floorSampleMeshes.length; m++) {
+          const sample = this.floorSampleMeshes[m];
+          sample.mesh.skeleton?.update();
+          const posAttr = sample.mesh.geometry.attributes.position;
+          if (!posAttr) continue;
+          for (let idx = 0; idx < sample.indices.length; idx++) {
+            const vIdx = sample.indices[idx];
+            this.tmpFloorVec.fromBufferAttribute(posAttr, vIdx);
+            sample.mesh.applyBoneTransform(vIdx, this.tmpFloorVec);
+            this.tmpFloorVec.applyMatrix4(sample.mesh.matrixWorld);
+            this.tmpFloorVec.applyMatrix4(this.tmpInvRootMat);
+            const groundAtZ = -this.tmpFloorVec.z * slopeTan;
+            const clearance = this.tmpFloorVec.y - this.floorLiftY - groundAtZ;
+            if (clearance < minRawClearance) {
+              minRawClearance = clearance;
+            }
+          }
+        }
+      }
+
+      const desiredLiftY =
+        minRawClearance < targetMargin
+          ? THREE.MathUtils.clamp(targetMargin - minRawClearance, 0, 0.56)
+          : 0;
+      if (desiredLiftY > this.floorLiftY) {
+        this.floorLiftY = desiredLiftY;
+      } else {
+        this.floorLiftY = THREE.MathUtils.damp(this.floorLiftY, desiredLiftY, 16, dt);
+      }
+    } else {
+      this.floorLiftY = THREE.MathUtils.damp(this.floorLiftY, 0, 18, dt);
+    }
+    this.modelPivot.position.y = -0.85 + this.floorLiftY;
   }
 
   public markContextRestored(): void {
@@ -1888,6 +2010,10 @@ export class GlbChaserController {
   private readonly tmpQuatA = new THREE.Quaternion();
   private readonly tmpQuatB = new THREE.Quaternion();
   private readonly tmpQuatC = new THREE.Quaternion();
+  private readonly floorBoneChecks: Array<{ bone: THREE.Object3D; clearance: number }> = [];
+  private readonly tmpFloorVec = new THREE.Vector3();
+  private readonly tmpInvRootMat = new THREE.Matrix4();
+  private floorLiftY = 0;
 
   private slapActive = false;
   private slapElapsed = 0;
@@ -1936,11 +2062,27 @@ export class GlbChaserController {
     let spineBone: THREE.Object3D | null = null;
     let rightArmBone: THREE.Object3D | null = null;
     let rightForeArmBone: THREE.Object3D | null = null;
+    const footKeys = new Set(['leftfoot', 'lefttoebase', 'rightfoot', 'righttoebase']);
+    const seenFootKeys = new Set<string>();
+    const tmpFootWorld = new THREE.Vector3();
+
     cloned.traverse((obj) => {
       if (!spineBone && /Spine2$/i.test(obj.name)) spineBone = obj;
       else if (!spineBone && /Spine1$/i.test(obj.name)) spineBone = obj;
       if (!rightArmBone && /RightArm$/i.test(obj.name)) rightArmBone = obj;
       if (!rightForeArmBone && /RightForeArm$/i.test(obj.name)) rightForeArmBone = obj;
+
+      if (obj.name) {
+        const key = getNormalizedBoneKey(obj.name);
+        if (footKeys.has(key) && !seenFootKeys.has(key)) {
+          seenFootKeys.add(key);
+          obj.getWorldPosition(tmpFootWorld);
+          this.floorBoneChecks.push({
+            bone: obj,
+            clearance: THREE.MathUtils.clamp(tmpFootWorld.y - 0.005, 0.025, 0.14),
+          });
+        }
+      }
     });
     this.spineBone = spineBone;
     this.rightArmBone = rightArmBone;
@@ -2046,93 +2188,125 @@ export class GlbChaserController {
     bone.quaternion.slerp(this.tmpQuatC, THREE.MathUtils.clamp(weight, 0, 1));
   }
 
-  public update(dt: number): void {
+  public update(
+    dt: number,
+    options?: { clampFloor?: boolean; floorSlopeTan?: number },
+  ): void {
     this.mixer.update(dt);
 
-    if (!this.slapActive) return;
+    if (this.slapActive) {
+      this.slapElapsed += dt;
+      const totalDur = 0.96;
+      if (this.slapElapsed >= totalDur) {
+        this.slapActive = false;
+      } else {
+        const t = this.slapElapsed;
+        const windEnd = 0.34;
+        const holdEnd = 0.43;
+        const strikeEnd = 0.55;
+        const smooth = (x: number) => {
+          const c = THREE.MathUtils.clamp(x, 0, 1);
+          return c * c * (3 - 2 * c);
+        };
 
-    this.slapElapsed += dt;
-    const totalDur = 0.96;
-    if (this.slapElapsed >= totalDur) {
-      this.slapActive = false;
-      return;
+        let slapWeight = 1;
+        let spineYaw = 0;
+        let spinePitch = 0;
+        const armDir = this.tmpArmDir;
+        const foreDir = this.tmpForeDir;
+        const windArm = this.tmpWindArm;
+        const windFore = this.tmpWindFore;
+        const strikeArm = this.tmpStrikeArm.set(this.slapAimX * 0.32, -0.14, -0.96);
+        const strikeFore = this.tmpStrikeFore.set(this.slapAimX * 0.42, -0.3, -0.92);
+
+        if (t < windEnd) {
+          const p = smooth(t / windEnd);
+          slapWeight = p;
+          armDir.set(0.45, -0.55, -0.25).lerp(windArm, p);
+          foreDir.set(0.35, -0.5, -0.35).lerp(windFore, p);
+          spineYaw = -0.44 * p;
+          spinePitch = -0.2 * p;
+        } else if (t < holdEnd) {
+          slapWeight = 1;
+          armDir.copy(windArm);
+          foreDir.copy(windFore);
+          spineYaw = -0.44;
+          spinePitch = -0.2;
+        } else if (t < strikeEnd) {
+          const p = smooth((t - holdEnd) / (strikeEnd - holdEnd));
+          slapWeight = 1;
+          armDir.copy(windArm).lerp(strikeArm, p);
+          foreDir.copy(windFore).lerp(strikeFore, p);
+          spineYaw = THREE.MathUtils.lerp(-0.44, 0.44 * -this.slapAimX, p);
+          spinePitch = THREE.MathUtils.lerp(-0.2, 0.36, p);
+        } else {
+          const p = smooth((t - strikeEnd) / (totalDur - strikeEnd));
+          slapWeight = 1 - p;
+          armDir.copy(strikeArm);
+          foreDir.copy(strikeFore);
+          spineYaw = THREE.MathUtils.lerp(0.44 * -this.slapAimX, 0, p);
+          spinePitch = THREE.MathUtils.lerp(0.36, 0, p);
+        }
+
+        if (this.spineBone) {
+          this.tmpQuatA.setFromAxisAngle(this.spineYawAxis, spineYaw);
+          this.spineBone.quaternion.multiply(this.tmpQuatA);
+          this.tmpQuatA.setFromAxisAngle(this.spinePitchAxis, spinePitch);
+          this.spineBone.quaternion.multiply(this.tmpQuatA);
+        }
+
+        this.root.updateMatrixWorld(true);
+        if (this.rightArmBone) {
+          this.applyRootSpaceArmAim(
+            this.rightArmBone,
+            this.rightArmRestWorldQ,
+            this.rightArmRestDir,
+            armDir,
+            slapWeight,
+          );
+          this.rightArmBone.updateMatrixWorld(true);
+        }
+        if (this.rightForeArmBone) {
+          this.applyRootSpaceArmAim(
+            this.rightForeArmBone,
+            this.rightForeArmRestWorldQ,
+            this.rightForeArmRestDir,
+            foreDir,
+            slapWeight,
+          );
+        }
+      }
     }
 
-    const t = this.slapElapsed;
-    const windEnd = 0.34;
-    const holdEnd = 0.43;
-    const strikeEnd = 0.55;
-    const smooth = (x: number) => {
-      const c = THREE.MathUtils.clamp(x, 0, 1);
-      return c * c * (3 - 2 * c);
-    };
-
-    let slapWeight = 1;
-    let spineYaw = 0;
-    let spinePitch = 0;
-    const armDir = this.tmpArmDir;
-    const foreDir = this.tmpForeDir;
-    const windArm = this.tmpWindArm;
-    const windFore = this.tmpWindFore;
-    const strikeArm = this.tmpStrikeArm.set(this.slapAimX * 0.32, -0.14, -0.96);
-    const strikeFore = this.tmpStrikeFore.set(this.slapAimX * 0.42, -0.3, -0.92);
-
-    if (t < windEnd) {
-      const p = smooth(t / windEnd);
-      slapWeight = p;
-      armDir.set(0.45, -0.55, -0.25).lerp(windArm, p);
-      foreDir.set(0.35, -0.5, -0.35).lerp(windFore, p);
-      spineYaw = -0.44 * p;
-      spinePitch = -0.2 * p;
-    } else if (t < holdEnd) {
-      slapWeight = 1;
-      armDir.copy(windArm);
-      foreDir.copy(windFore);
-      spineYaw = -0.44;
-      spinePitch = -0.2;
-    } else if (t < strikeEnd) {
-      const p = smooth((t - holdEnd) / (strikeEnd - holdEnd));
-      slapWeight = 1;
-      armDir.copy(windArm).lerp(strikeArm, p);
-      foreDir.copy(windFore).lerp(strikeFore, p);
-      spineYaw = THREE.MathUtils.lerp(-0.44, 0.44 * -this.slapAimX, p);
-      spinePitch = THREE.MathUtils.lerp(-0.2, 0.36, p);
+    if (options?.clampFloor && this.floorBoneChecks.length > 0) {
+      const slopeTan = options.floorSlopeTan ?? 0;
+      this.root.updateMatrixWorld(true);
+      this.tmpInvRootMat.copy(this.root.matrixWorld).invert();
+      let minRawClearance = Infinity;
+      for (let i = 0; i < this.floorBoneChecks.length; i++) {
+        const entry = this.floorBoneChecks[i];
+        entry.bone.getWorldPosition(this.tmpFloorVec);
+        this.tmpFloorVec.applyMatrix4(this.tmpInvRootMat);
+        const groundAtZ = -this.tmpFloorVec.z * slopeTan;
+        const clearance =
+          this.tmpFloorVec.y - this.floorLiftY - entry.clearance - groundAtZ;
+        if (clearance < minRawClearance) {
+          minRawClearance = clearance;
+        }
+      }
+      const desiredLiftY =
+        minRawClearance < 0.008
+          ? THREE.MathUtils.clamp(0.008 - minRawClearance, 0, 0.35)
+          : 0;
+      if (desiredLiftY > this.floorLiftY) {
+        this.floorLiftY = desiredLiftY;
+      } else {
+        this.floorLiftY = THREE.MathUtils.damp(this.floorLiftY, desiredLiftY, 16, dt);
+      }
     } else {
-      const p = smooth((t - strikeEnd) / (totalDur - strikeEnd));
-      slapWeight = 1 - p;
-      armDir.copy(strikeArm);
-      foreDir.copy(strikeFore);
-      spineYaw = THREE.MathUtils.lerp(0.44 * -this.slapAimX, 0, p);
-      spinePitch = THREE.MathUtils.lerp(0.36, 0, p);
+      this.floorLiftY = THREE.MathUtils.damp(this.floorLiftY, 0, 18, dt);
     }
-
-    if (this.spineBone) {
-      this.tmpQuatA.setFromAxisAngle(this.spineYawAxis, spineYaw);
-      this.spineBone.quaternion.multiply(this.tmpQuatA);
-      this.tmpQuatA.setFromAxisAngle(this.spinePitchAxis, spinePitch);
-      this.spineBone.quaternion.multiply(this.tmpQuatA);
-    }
-
-    this.root.updateMatrixWorld(true);
-    if (this.rightArmBone) {
-      this.applyRootSpaceArmAim(
-        this.rightArmBone,
-        this.rightArmRestWorldQ,
-        this.rightArmRestDir,
-        armDir,
-        slapWeight,
-      );
-      this.rightArmBone.updateMatrixWorld(true);
-    }
-    if (this.rightForeArmBone) {
-      this.applyRootSpaceArmAim(
-        this.rightForeArmBone,
-        this.rightForeArmRestWorldQ,
-        this.rightForeArmRestDir,
-        foreDir,
-        slapWeight,
-      );
-    }
+    this.modelPivot.position.y = this.floorLiftY;
   }
 
   public markContextRestored(): void {

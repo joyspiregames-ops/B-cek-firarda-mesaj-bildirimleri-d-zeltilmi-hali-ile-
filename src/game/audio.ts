@@ -121,6 +121,8 @@ class GameAudioEngine {
   private voiceWarmupIndex = 0;
   private lastVariantIndex = new Map<string, number>();
   private lastEventVoiceMs = new Map<string, number>();
+  private lastTrainPassSoundMs = 0;
+  private lastTaxiHornMs = 0;
 
   private getFallbackAudioElement(url: string): HTMLAudioElement {
     if (!this.fallbackAudioEl) {
@@ -1142,6 +1144,186 @@ class GameAudioEngine {
       g.connect(this.masterGain);
       osc.start(t);
       osc.stop(t + 0.1);
+    });
+  }
+
+  public playTaxiHornPass(): void {
+    if (!this.sfxEnabled || !this.ctx || !this.masterGain || this.adMuted) return;
+    const nowMs = performance.now();
+    if (nowMs - this.lastTaxiHornMs < 700) return;
+    this.lastTaxiHornMs = nowMs;
+
+    const now = this.ctx.currentTime;
+    // Classic Istanbul/city taxi dual-tone horn ("DİT - DİİİT!")
+    const honks = [
+      { offset: 0, dur: 0.11, peak: 0.14 },
+      { offset: 0.155, dur: 0.22, peak: 0.165 },
+    ];
+    honks.forEach(({ offset, dur, peak }) => {
+      if (!this.ctx || !this.masterGain) return;
+      const t = now + offset;
+      [415, 523.25].forEach((freq) => {
+        if (!this.ctx || !this.masterGain) return;
+        const osc = this.ctx.createOscillator();
+        const filter = this.ctx.createBiquadFilter();
+        const g = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, t);
+        // Slight Doppler pitch drop on the second honk as the taxi sweeps past
+        if (offset > 0) {
+          osc.frequency.exponentialRampToValueAtTime(freq * 0.93, t + dur);
+        }
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(1450, t);
+        filter.Q.value = 1.6;
+
+        g.gain.setValueAtTime(0.001, t);
+        g.gain.linearRampToValueAtTime(peak, t + 0.016);
+        g.gain.setValueAtTime(peak * 0.92, t + dur * 0.65);
+        g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+
+        osc.connect(filter);
+        filter.connect(g);
+        g.connect(this.masterGain);
+        osc.start(t);
+        osc.stop(t + dur + 0.02);
+      });
+    });
+
+    // Crisp rushing tire/air pass-by right alongside the horn
+    const passDur = 0.42;
+    const len = Math.floor(this.ctx.sampleRate * passDur);
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      const env = Math.sin((i / len) * Math.PI);
+      data[i] = (Math.random() * 2 - 1) * env;
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buf;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(760, now + 0.05);
+    bp.frequency.exponentialRampToValueAtTime(240, now + passDur);
+    bp.Q.value = 1.2;
+    const ng = this.ctx.createGain();
+    ng.gain.setValueAtTime(0.001, now);
+    ng.gain.linearRampToValueAtTime(0.15, now + 0.14);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + passDur);
+    noise.connect(bp);
+    bp.connect(ng);
+    ng.connect(this.masterGain);
+    noise.start(now);
+  }
+
+  public playMovingTrainPass(): void {
+    if (!this.sfxEnabled || !this.ctx || !this.masterGain || this.adMuted) return;
+    const nowMs = performance.now();
+    if (nowMs - this.lastTrainPassSoundMs < 900) return;
+    this.lastTrainPassSoundMs = nowMs;
+
+    const now = this.ctx.currentTime;
+
+    // 1. Powerful deep subway locomotive dual-chord horn (D3 + F#3 + A3)
+    const hornNotes = [
+      { freq: 146.83, gain: 0.17 },
+      { freq: 185.0, gain: 0.15 },
+      { freq: 220.0, gain: 0.12 },
+    ];
+    hornNotes.forEach(({ freq, gain }) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const filter = this.ctx.createBiquadFilter();
+      const g = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq, now);
+      osc.frequency.linearRampToValueAtTime(freq * 1.015, now + 0.12);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.91, now + 0.64);
+
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(620, now);
+      filter.frequency.linearRampToValueAtTime(980, now + 0.14);
+      filter.frequency.exponentialRampToValueAtTime(420, now + 0.64);
+      filter.Q.value = 1.4;
+
+      g.gain.setValueAtTime(0.001, now);
+      g.gain.linearRampToValueAtTime(gain, now + 0.045);
+      g.gain.setValueAtTime(gain * 0.9, now + 0.36);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
+
+      osc.connect(filter);
+      filter.connect(g);
+      g.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 0.67);
+    });
+
+    // 2. Heavy underground rail & tunnel rumble sweeping across the 2 coupled train cars
+    const rumbleDur = 1.05;
+    const rumbleLen = Math.floor(this.ctx.sampleRate * rumbleDur);
+    const rumbleBuf = this.ctx.createBuffer(1, rumbleLen, this.ctx.sampleRate);
+    const rumbleData = rumbleBuf.getChannelData(0);
+    let lastSample = 0;
+    for (let i = 0; i < rumbleLen; i++) {
+      const white = Math.random() * 2 - 1;
+      lastSample = (lastSample + 0.08 * white) / 1.08;
+      rumbleData[i] = lastSample * 2.4;
+    }
+    const rumbleSrc = this.ctx.createBufferSource();
+    rumbleSrc.buffer = rumbleBuf;
+    const rumbleLp = this.ctx.createBiquadFilter();
+    rumbleLp.type = 'lowpass';
+    rumbleLp.frequency.setValueAtTime(160, now);
+    rumbleLp.frequency.linearRampToValueAtTime(340, now + 0.32);
+    rumbleLp.frequency.exponentialRampToValueAtTime(110, now + rumbleDur);
+    const rumbleGain = this.ctx.createGain();
+    rumbleGain.gain.setValueAtTime(0.001, now);
+    rumbleGain.gain.linearRampToValueAtTime(0.32, now + 0.22);
+    rumbleGain.gain.setValueAtTime(0.28, now + 0.58);
+    rumbleGain.gain.exponentialRampToValueAtTime(0.001, now + rumbleDur);
+    rumbleSrc.connect(rumbleLp);
+    rumbleLp.connect(rumbleGain);
+    rumbleGain.connect(this.masterGain);
+    rumbleSrc.start(now);
+
+    // 3. Rhythmic steel wagon wheel rail-joint clacks ("tak-tak ... tak-tak ... tak-tak")
+    const clackOffsets = [0.1, 0.2, 0.42, 0.52, 0.74, 0.84];
+    clackOffsets.forEach((offset, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const t = now + offset;
+      const clackLen = Math.floor(this.ctx.sampleRate * 0.065);
+      const clackBuf = this.ctx.createBuffer(1, clackLen, this.ctx.sampleRate);
+      const cData = clackBuf.getChannelData(0);
+      for (let i = 0; i < clackLen; i++) {
+        cData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (clackLen * 0.24));
+      }
+      const cSrc = this.ctx.createBufferSource();
+      cSrc.buffer = clackBuf;
+      const cBp = this.ctx.createBiquadFilter();
+      cBp.type = 'bandpass';
+      cBp.frequency.value = idx % 2 === 0 ? 780 : 1040;
+      cBp.Q.value = 1.6;
+      const cGain = this.ctx.createGain();
+      const envScale = offset > 0.6 ? 0.75 : 1.0;
+      cGain.gain.setValueAtTime(0.22 * envScale, t);
+      cGain.gain.exponentialRampToValueAtTime(0.001, t + 0.065);
+      cSrc.connect(cBp);
+      cBp.connect(cGain);
+      cGain.connect(this.masterGain);
+      cSrc.start(t);
+
+      // Steel rail thump under each wheel hit
+      const thud = this.ctx.createOscillator();
+      const tg = this.ctx.createGain();
+      thud.type = 'triangle';
+      thud.frequency.setValueAtTime(idx % 2 === 0 ? 115 : 98, t);
+      thud.frequency.exponentialRampToValueAtTime(48, t + 0.06);
+      tg.gain.setValueAtTime(0.16 * envScale, t);
+      tg.gain.exponentialRampToValueAtTime(0.001, t + 0.065);
+      thud.connect(tg);
+      tg.connect(this.masterGain);
+      thud.start(t);
+      thud.stop(t + 0.07);
     });
   }
 

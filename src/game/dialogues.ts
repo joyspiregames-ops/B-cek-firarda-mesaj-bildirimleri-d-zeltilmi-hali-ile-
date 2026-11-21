@@ -325,6 +325,8 @@ export const DEATH_REASONS: Record<string, string> = {
   phone_roach: 'TELEFONLU BÖCEĞE ÇARPTIN',
   mine_cart: 'MADEN VAGONUNA ÇARPTIN',
   moving_mine_cart: 'RAYLI VAGONA ÇARPTIN',
+  moving_train: 'HIZLI METRO TRENİNE ÇARPTIN',
+  parked_train: 'PARK HALİNDEKİ TRENE ÇARPTIN',
   crystal_pillar: 'DEV KRİSTAL SÜTUNUNA ÇARPTIN',
   earth_boulder: 'TOPRAK KAYASINA ÇARPTIN',
   root_arch: 'KÖK KEMERİNE ÇARPTIN',

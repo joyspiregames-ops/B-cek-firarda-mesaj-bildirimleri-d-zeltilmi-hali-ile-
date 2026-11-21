@@ -276,6 +276,8 @@ export const DEATH_REASONS_EN: Record<string, string> = {
   phone_roach: 'BUMPED INTO A PHONE ROACH!',
   mine_cart: 'HIT A MINE CART!',
   moving_mine_cart: 'STRUCK BY A RAIL CART!',
+  moving_train: 'STRUCK BY AN EXPRESS TRAIN!',
+  parked_train: 'CRASHED INTO A PARKED TRAIN!',
   crystal_pillar: 'HIT A GIANT CRYSTAL PILLAR!',
   earth_boulder: 'CRASHED INTO A BOULDER!',
   root_arch: 'HIT A ROOT ARCH!',

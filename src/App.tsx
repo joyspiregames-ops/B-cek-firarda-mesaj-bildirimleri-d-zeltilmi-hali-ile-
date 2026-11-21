@@ -1,4 +1,5 @@
-import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
+import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DailyRewardModal } from './components/DailyRewardModal';
 import { GameHudOverlay, MissionToast } from './components/GameHudOverlay';
@@ -151,6 +152,7 @@ export default function App() {
   const [adNotice, setAdNotice] = useState<string | null>(null);
   const [isNativeStore] = useState<boolean>(() => Capacitor.isNativePlatform());
   const [storePrices, setStorePrices] = useState<Record<string, string>>({});
+  const hasLiveStore = isNativeStore && Object.keys(storePrices).length > 0;
   const [buyingProductId, setBuyingProductId] = useState<string | null>(null);
   const [purchaseNotice, setPurchaseNotice] = useState<string | null>(null);
   const [engineError, setEngineError] = useState<string | null>(null);
@@ -273,7 +275,45 @@ export default function App() {
       }
     };
     document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
+
+    let appStateCancelled = false;
+    let appStateHandle: PluginListenerHandle | null = null;
+    if (Capacitor.isNativePlatform()) {
+      void CapApp.addListener('appStateChange', ({ isActive }) => {
+        if (isActive) {
+          touchLastOpened();
+          if (engineRef.current) {
+            engineRef.current.setAppBackgrounded(false);
+          } else {
+            gameAudio.resumeFromBackground();
+          }
+        } else {
+          if (engineRef.current) {
+            engineRef.current.setAppBackgrounded(true);
+          } else {
+            gameAudio.suspendForBackground();
+          }
+          void syncNativeScheduledNotifications(
+            saveRef.current,
+            getDailyRewardInfo(saveRef.current.dailyReward),
+          );
+        }
+      })
+        .then((handle) => {
+          if (appStateCancelled) {
+            void handle.remove().catch(() => {});
+            return;
+          }
+          appStateHandle = handle;
+        })
+        .catch(() => {});
+    }
+
+    return () => {
+      appStateCancelled = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      void appStateHandle?.remove().catch(() => {});
+    };
   }, [persistSave]);
 
   const backStateRef = useRef({
@@ -345,53 +385,30 @@ export default function App() {
     document.addEventListener('backbutton', onDomBackButton);
 
     let cancelled = false;
-    let capHandle: { remove?: () => Promise<void> | void } | null = null;
-    try {
-      const capApp = (
-        window as unknown as {
-          Capacitor?: {
-            Plugins?: {
-              App?: {
-                addListener?: (
-                  event: string,
-                  cb: () => void,
-                ) => Promise<{ remove?: () => Promise<void> | void }> | { remove?: () => void };
-              };
-            };
-          };
+    let capHandle: PluginListenerHandle | null = null;
+    if (Capacitor.isNativePlatform()) {
+      void CapApp.addListener('backButton', () => {
+        const handled = handleBackAction();
+        if (!handled) {
+          void CapApp.minimizeApp().catch(() => {
+            void CapApp.exitApp().catch(() => {});
+          });
         }
-      ).Capacitor?.Plugins?.App;
-      if (capApp?.addListener) {
-        Promise.resolve(
-          capApp.addListener('backButton', () => {
-            handleBackAction();
-          }),
-        )
-          .then((handle) => {
-            if (cancelled) {
-              try {
-                void handle?.remove?.();
-              } catch {
-                // ignore
-              }
-              return;
-            }
-            capHandle = handle ?? null;
-          })
-          .catch(() => {});
-      }
-    } catch {
-      // Ignore when @capacitor/app plugin is absent
+      })
+        .then((handle) => {
+          if (cancelled) {
+            void handle.remove().catch(() => {});
+            return;
+          }
+          capHandle = handle;
+        })
+        .catch(() => {});
     }
 
     return () => {
       cancelled = true;
       document.removeEventListener('backbutton', onDomBackButton);
-      try {
-        void capHandle?.remove?.();
-      } catch {
-        // ignore
-      }
+      void capHandle?.remove().catch(() => {});
     };
   }, []);
 
@@ -1152,9 +1169,13 @@ export default function App() {
     if (hud.adReviveUsed) return;
     if (!adBridge.isRewardedReady()) {
       setAdNotice(
-        activeLangRef.current === 'tr'
-          ? 'AdMob Android paketi kurulunca burada gerçek ödüllü reklam oynatılıp ücretsiz canlandırır.'
-          : 'Rewarded ads for a free revive will play here in the Android release.',
+        isNativeStore
+          ? activeLangRef.current === 'tr'
+            ? 'Ödüllü reklam henüz yükleniyor veya internet yok. Birazdan tekrar dene!'
+            : 'Rewarded ad is still loading or offline. Try again in a moment!'
+          : activeLangRef.current === 'tr'
+            ? 'AdMob Android paketi kurulunca burada gerçek ödüllü reklam oynatılıp ücretsiz canlandırır.'
+            : 'Rewarded ads for a free revive will play here in the Android release.',
       );
       return;
     }
@@ -1265,7 +1286,7 @@ export default function App() {
   };
 
   const handleBuyCoinPack = async (productId: string) => {
-    if (!isNativeStore || buyingProductId) return;
+    if (!hasLiveStore || buyingProductId) return;
     setPurchaseNotice(null);
     setBuyingProductId(productId);
     try {
@@ -1658,7 +1679,7 @@ export default function App() {
           save={save}
           lang={activeLang}
           missionsOpen={missionsOpen}
-          canBuyCoins={isNativeStore}
+          canBuyCoins={hasLiveStore}
           onSetMissionsOpen={setMissionsOpen}
           onStopCharacterVoice={() => gameAudio.stopMenuVoice()}
           onStart={handleStartRun}
@@ -1722,7 +1743,7 @@ export default function App() {
           upgrades={save.upgrades}
           portraits={portraits}
           initialTab={shopInitialTab}
-          isNativeStore={isNativeStore}
+          isNativeStore={hasLiveStore}
           storePrices={storePrices}
           buyingProductId={buyingProductId}
           purchaseNotice={purchaseNotice}

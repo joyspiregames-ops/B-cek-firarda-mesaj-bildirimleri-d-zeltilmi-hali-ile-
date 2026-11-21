@@ -8,11 +8,16 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "android:setup": "npm run build && node scripts/setup-android.mjs",
+    "android:sync": "npm run build && npx cap sync android",
+    "android:apk": "node scripts/build-android.mjs apk",
+    "android:aab": "node scripts/build-android.mjs aab"
   },
   "dependencies": {
     "@capacitor-community/admob": "^8.4.2",
     "@capacitor/android": "^8.6.2",
+    "@capacitor/app": "^8.1.2",
     "@capacitor/cli": "^8.6.2",
     "@capacitor/core": "^8.6.2",
     "@capacitor/local-notifications": "^8.3.1",

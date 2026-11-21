@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PowerupType, SkinConfig, SkinId } from './types';
 
@@ -29,6 +30,142 @@ const SHARED_STANDARD_VC = new THREE.MeshStandardMaterial({
   roughness: 0.22,
   metalness: 0.42,
 });
+
+// Shared module-level biome materials (disposed in disposeModelsModuleSingletons)
+let sharedEarthShellMat: THREE.MeshStandardMaterial | null = null;
+let sharedEarthShellTex: THREE.Texture | null = null;
+function getEarthTunnelShellMat(earthWallTexture: THREE.Texture): THREE.MeshStandardMaterial {
+  if (!sharedEarthShellMat || sharedEarthShellTex !== earthWallTexture) {
+    sharedEarthShellMat?.dispose();
+    sharedEarthShellTex = earthWallTexture;
+    sharedEarthShellMat = new THREE.MeshStandardMaterial({
+      map: earthWallTexture,
+      color: 0xb48a6a,
+      roughness: 0.94,
+      side: THREE.BackSide,
+    });
+  }
+  return sharedEarthShellMat;
+}
+
+let sharedIceWorldMats: {
+  glacierMat: THREE.MeshStandardMaterial;
+  auroraGreenMat: THREE.MeshBasicMaterial;
+  auroraCyanMat: THREE.MeshBasicMaterial;
+  auroraVioletMat: THREE.MeshBasicMaterial;
+} | null = null;
+function getIceWorldSharedMats() {
+  if (!sharedIceWorldMats) {
+    sharedIceWorldMats = {
+      glacierMat: new THREE.MeshStandardMaterial({
+        color: 0x38bdf8,
+        emissive: 0x0369a1,
+        emissiveIntensity: 0.32,
+        roughness: 0.1,
+        metalness: 0.22,
+        transparent: true,
+        opacity: 0.88,
+      }),
+      auroraGreenMat: new THREE.MeshBasicMaterial({
+        color: 0x34d399,
+        transparent: true,
+        opacity: 0.48,
+      }),
+      auroraCyanMat: new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.48,
+      }),
+      auroraVioletMat: new THREE.MeshBasicMaterial({
+        color: 0xa78bfa,
+        transparent: true,
+        opacity: 0.36,
+      }),
+    };
+  }
+  return sharedIceWorldMats;
+}
+
+let sharedBathTransMats: {
+  waterStreamMat: THREE.MeshStandardMaterial;
+  curtainAquaMat: THREE.MeshStandardMaterial;
+  curtainPinkMat: THREE.MeshStandardMaterial;
+  bubbleMat: THREE.MeshStandardMaterial;
+} | null = null;
+function getBathSharedTransMats() {
+  if (!sharedBathTransMats) {
+    sharedBathTransMats = {
+      waterStreamMat: new THREE.MeshStandardMaterial({
+        color: 0x67e8f9,
+        emissive: 0x06b6d4,
+        emissiveIntensity: 0.25,
+        transparent: true,
+        opacity: 0.62,
+        roughness: 0.08,
+      }),
+      curtainAquaMat: new THREE.MeshStandardMaterial({
+        color: 0x67e8f9,
+        transparent: true,
+        opacity: 0.72,
+        roughness: 0.55,
+        side: THREE.DoubleSide,
+      }),
+      curtainPinkMat: new THREE.MeshStandardMaterial({
+        color: 0xfbcfe8,
+        transparent: true,
+        opacity: 0.72,
+        roughness: 0.55,
+        side: THREE.DoubleSide,
+      }),
+      bubbleMat: new THREE.MeshStandardMaterial({
+        color: 0xe0f2fe,
+        emissive: 0x38bdf8,
+        emissiveIntensity: 0.28,
+        transparent: true,
+        opacity: 0.52,
+        roughness: 0.08,
+      }),
+    };
+  }
+  return sharedBathTransMats;
+}
+
+let sharedLabGlassMat: THREE.MeshStandardMaterial | null = null;
+function getLabSharedGlassMat(): THREE.MeshStandardMaterial {
+  if (!sharedLabGlassMat) {
+    sharedLabGlassMat = new THREE.MeshStandardMaterial({
+      color: 0xdcfce7,
+      transparent: true,
+      opacity: 0.36,
+      roughness: 0.08,
+      metalness: 0.12,
+    });
+  }
+  return sharedLabGlassMat;
+}
+
+let sharedSpaceTransMats: {
+  ringMat: THREE.MeshBasicMaterial;
+  domeMat: THREE.MeshStandardMaterial;
+} | null = null;
+function getSpaceSharedTransMats() {
+  if (!sharedSpaceTransMats) {
+    sharedSpaceTransMats = {
+      ringMat: new THREE.MeshBasicMaterial({
+        color: 0xe879f9,
+        transparent: true,
+        opacity: 0.65,
+      }),
+      domeMat: new THREE.MeshStandardMaterial({
+        color: 0x86efac,
+        transparent: true,
+        opacity: 0.62,
+        roughness: 0.1,
+      }),
+    };
+  }
+  return sharedSpaceTransMats;
+}
 
 type BakeBucketKey =
   | 'basic'
@@ -2980,37 +3117,91 @@ export function createStreetArchModel(): THREE.Group {
 
 // --- New Gameplay & Dynamic Environment Models ---
 
+let movingTaxiGlowShared: {
+  haloGeo: THREE.BufferGeometry;
+  haloMat: THREE.Material;
+  poolGeo: THREE.BufferGeometry;
+  poolMat: THREE.Material;
+} | null = null;
+
+function getMovingTaxiGlowResources() {
+  if (movingTaxiGlowShared) return movingTaxiGlowShared;
+  const tex = getCaveTrainGlowTexture();
+  movingTaxiGlowShared = {
+    haloGeo: new THREE.PlaneGeometry(0.74, 0.74),
+    haloMat: new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+    poolGeo: new THREE.PlaneGeometry(2.15, 5.2),
+    poolMat: new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      opacity: 0.42,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  };
+  return movingTaxiGlowShared;
+}
+
 export function createMovingTaxiModel(): THREE.Group {
   const group = createTaxiModel(true);
   const wheels = group.userData.wheels as THREE.Mesh[] | undefined;
+  const skip = new Set<THREE.Object3D>(wheels ?? []);
   // Approaching traffic headlights facing +Z toward the player!
   const beamMat = new THREE.MeshBasicMaterial({
     color: 0xfef9c3,
   });
+  const glowRes = getMovingTaxiGlowResources();
+  const headlightRig = new THREE.Group();
   [-0.65, 0.65].forEach((hx) => {
-    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.18, 0.08), beamMat);
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.2, 0.08), beamMat);
     lamp.position.set(hx, 0.66, 1.82);
     group.add(lamp);
 
+    const halo = new THREE.Mesh(glowRes.haloGeo, glowRes.haloMat);
+    halo.position.set(hx, 0.66, 1.88);
+    halo.userData.sharedGeometry = true;
+    halo.userData.sharedMaterial = true;
+    headlightRig.add(halo);
+
     const glowCone = new THREE.Mesh(
-      new THREE.ConeGeometry(0.54, 1.8, 10, 1, true),
+      new THREE.ConeGeometry(0.62, 2.5, 10, 1, true),
       new THREE.MeshBasicMaterial({
         color: 0xfef08a,
         transparent: true,
-        opacity: 0.14,
+        opacity: 0.18,
         depthWrite: false,
         side: THREE.DoubleSide,
       }),
     );
-    glowCone.rotation.x = -Math.PI / 2;
-    glowCone.position.set(hx, 0.45, 2.7);
-    group.add(glowCone);
+    glowCone.rotation.x = -Math.PI / 2 - 0.06;
+    glowCone.position.set(hx, 0.44, 3.05);
+    headlightRig.add(glowCone);
   });
-  return bakeStaticGroup(group, {
+
+  const roadPool = new THREE.Mesh(glowRes.poolGeo, glowRes.poolMat);
+  roadPool.rotation.x = -Math.PI / 2;
+  roadPool.position.set(0, 0.03, 4.35);
+  roadPool.userData.sharedGeometry = true;
+  roadPool.userData.sharedMaterial = true;
+  headlightRig.add(roadPool);
+
+  group.add(headlightRig);
+  skip.add(headlightRig);
+
+  const baked = bakeStaticGroup(group, {
     castShadow: true,
     keepTransparent: true,
-    skipObjects: wheels ? new Set<THREE.Object3D>(wheels) : undefined,
+    skipObjects: skip,
   });
+  baked.userData.headlightRig = headlightRig;
+  return baked;
 }
 
 /**
@@ -3224,16 +3415,11 @@ export function createEarthCavernSegmentProps(
   }> = [];
   const skipObjects = new Set<THREE.Object3D>();
 
-  const tunnelShellMat = new THREE.MeshStandardMaterial({
-    map: earthWallTexture,
-    color: 0xb48a6a,
-    roughness: 0.94,
-    side: THREE.BackSide,
-  });
+  const tunnelShellMat = getEarthTunnelShellMat(earthWallTexture);
+  // Untextured earthy rock material so mounds & pillars merge into SHARED_MATTE_VC (0 extra draw calls!)
   const rockMat = new THREE.MeshStandardMaterial({
-    map: earthWallTexture,
-    color: 0x85583a,
-    roughness: 0.92,
+    color: 0x7c5032,
+    roughness: 0.94,
   });
   const stalactiteMat = new THREE.MeshStandardMaterial({
     color: 0x5c3d28,
@@ -3249,15 +3435,50 @@ export function createEarthCavernSegmentProps(
     roughness: 0.38,
   });
 
-  addLaneStripes(group, 0xf59e0b, 0.34);
+  // 3-lane Subway / Mine Railway Tracks (merged into static segment batch — 0 extra draw calls)
+  const ballastMat = new THREE.MeshStandardMaterial({ color: 0x261f1b, roughness: 0.95 });
+  const sleeperMat = new THREE.MeshStandardMaterial({ color: 0x5c3a21, roughness: 0.88 });
+  const steelRailMat = new THREE.MeshStandardMaterial({
+    color: 0x94a3b8,
+    metalness: 0.82,
+    roughness: 0.24,
+  });
+  const railCapMat = new THREE.MeshStandardMaterial({
+    color: 0xe2e8f0,
+    metalness: 0.88,
+    roughness: 0.16,
+  });
+  [-2.6, 0, 2.6].forEach((laneX) => {
+    const bed = new THREE.Mesh(new THREE.BoxGeometry(1.78, 0.022, 20), ballastMat);
+    bed.position.set(laneX, 0.011, 0);
+    group.add(bed);
 
-  // Enclosed arched subterranean earth dome (clears 10.6m high!)
+    for (let s = 0; s < 10; s++) {
+      const sz = -9 + s * 2;
+      const sleeper = new THREE.Mesh(new THREE.BoxGeometry(1.56, 0.044, 0.24), sleeperMat);
+      sleeper.position.set(laneX, 0.026, sz);
+      group.add(sleeper);
+    }
+
+    [-0.54, 0.54].forEach((rx) => {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.068, 20), steelRailMat);
+      rail.position.set(laneX + rx, 0.056, 0);
+      group.add(rail);
+
+      const railTop = new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.016, 20), railCapMat);
+      railTop.position.set(laneX + rx, 0.094, 0);
+      group.add(railTop);
+    });
+  });
+
+  // High arched subterranean earth dome (clears 12.6m high so Jetpack camera never clips ceiling!)
   const archDome = new THREE.Mesh(
-    new THREE.CylinderGeometry(7.6, 7.6, 20, 12, 1, true, -Math.PI * 0.56, Math.PI * 1.12),
+    new THREE.CylinderGeometry(8.8, 8.8, 20, 12, 1, true, -Math.PI * 0.56, Math.PI * 1.12),
     tunnelShellMat,
   );
+  archDome.userData.sharedMaterial = true;
   archDome.rotation.x = -Math.PI / 2;
-  archDome.position.y = 3.0;
+  archDome.position.y = 3.8;
   group.add(archDome);
 
   const crystalPalette = [
@@ -3306,20 +3527,20 @@ export function createEarthCavernSegmentProps(
       group.add(shard);
     });
 
-    // Variation per 4 segments: side ore trolley / glowing mushroom grove / stone miner totem / timber hoist
+    // Variation per 4 segments: glowing amber shrine / bioluminescent mushroom grove / supply barrels / crystal geode
     const subVariant = (variant + idx) % 4;
     if (subVariant === 0) {
-      // Parked mini ore rail spur on cave shoulder
-      const cartBody = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.72, 1.4), woodMat);
-      cartBody.position.set(side * 5.05, 0.62, -cz);
-      group.add(cartBody);
+      // Glowing subterranean ore vein pillar on cave shoulder (old wooden carts removed)
+      const shrineRock = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.7, 1.45, 6), rockMat);
+      shrineRock.position.set(side * 5.1, 0.72, -cz);
+      group.add(shrineRock);
 
-      const cartOre = new THREE.Mesh(
-        new THREE.DodecahedronGeometry(0.42, 0),
+      const amberCore = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.42, 0),
         new THREE.MeshBasicMaterial({ color: 0xfde047 }),
       );
-      cartOre.position.set(side * 5.05, 1.08, -cz);
-      group.add(cartOre);
+      amberCore.position.set(side * 5.05, 1.68, -cz);
+      group.add(amberCore);
     } else if (subVariant === 1) {
       // Tall bioluminescent mushroom cluster
       const mushZ = -cz * 0.9;
@@ -3373,13 +3594,13 @@ export function createEarthCavernSegmentProps(
         stalactiteMat,
       );
       stalactite.rotation.x = Math.PI;
-      stalactite.position.set(side * 4.95, 8.9 - stLen * 0.35, sz);
+      stalactite.position.set(side * 4.95, 10.9 - stLen * 0.35, sz);
       group.add(stalactite);
     });
 
     // Gnarled roots hanging down from tunnel ceiling
     const root = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.24, 3.4, 6), woodMat);
-    root.position.set(side * 4.2, 8.4, -3.2);
+    root.position.set(side * 4.2, 10.4, -3.2);
     root.rotation.z = side * 0.28;
     group.add(root);
 
@@ -3399,10 +3620,10 @@ export function createEarthCavernSegmentProps(
     group.add(oreVein);
   });
 
-  // Heavy wooden mine timber support frame with iron gusset plates & swinging hanging lanterns
+  // Tall wooden mine timber support frame with iron gusset plates & swinging hanging lanterns (clears Jetpack camera!)
   [-4.75, 4.75].forEach((px) => {
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.52, 8.8, 0.52), woodMat);
-    post.position.set(px, 4.4, 0);
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.52, 11.0, 0.52), woodMat);
+    post.position.set(px, 5.5, 0);
     group.add(post);
 
     const ironBand = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.26, 0.58), ironMat);
@@ -3411,29 +3632,29 @@ export function createEarthCavernSegmentProps(
 
     // Side mine wall lantern mounted on post
     const sideArm = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.08, 0.1), ironMat);
-    sideArm.position.set(px + (px < 0 ? 0.36 : -0.36), 3.4, 0);
+    sideArm.position.set(px + (px < 0 ? 0.36 : -0.36), 3.7, 0);
     group.add(sideArm);
 
     const sideLamp = new THREE.Mesh(
       new THREE.CylinderGeometry(0.15, 0.15, 0.34, 6),
       new THREE.MeshBasicMaterial({ color: variant % 2 === 0 ? 0xfde047 : 0x5eead4 }),
     );
-    sideLamp.position.set(px + (px < 0 ? 0.5 : -0.5), 3.22, 0);
+    sideLamp.position.set(px + (px < 0 ? 0.5 : -0.5), 3.52, 0);
     group.add(sideLamp);
   });
   const beam = new THREE.Mesh(new THREE.BoxGeometry(10.2, 0.58, 0.58), woodMat);
-  beam.position.set(0, 8.75, 0);
+  beam.position.set(0, 10.95, 0);
   group.add(beam);
 
   [-3.95, 3.95].forEach((bx) => {
     const brace = new THREE.Mesh(new THREE.BoxGeometry(0.36, 1.8, 0.36), woodMat);
-    brace.position.set(bx, 7.95, 0);
+    brace.position.set(bx, 10.15, 0);
     brace.rotation.z = bx < 0 ? -0.78 : 0.78;
     group.add(brace);
   });
 
   const lanternPivot = new THREE.Group();
-  lanternPivot.position.set(0, 8.48, 0);
+  lanternPivot.position.set(0, 10.68, 0);
   const lanternCage = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 0.12, 6), ironMat);
   lanternCage.position.set(0, -0.1, 0);
   lanternPivot.add(lanternCage);
@@ -3448,7 +3669,7 @@ export function createEarthCavernSegmentProps(
   animatedProps.push({
     obj: lanternPivot,
     kind: 'sway',
-    baseY: 8.48,
+    baseY: 10.68,
     phase: segIndex * 1.1,
     amp: 0.16,
     speed: 2.3,
@@ -3506,8 +3727,8 @@ export function createTunnelDescentModel(
     roughness: 0.94,
   });
   [-1, 1].forEach((side) => {
-    const sideWall = new THREE.Mesh(new THREE.BoxGeometry(3.6, 12.5, 20.2), wallMat);
-    sideWall.position.set(side * 5.7, 1.9, 0);
+    const sideWall = new THREE.Mesh(new THREE.BoxGeometry(3.6, 14.5, 20.2), wallMat);
+    sideWall.position.set(side * 5.7, 2.9, 0);
     group.add(sideWall);
 
     const rail = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.9, rampLength), timberMat);
@@ -3516,21 +3737,21 @@ export function createTunnelDescentModel(
     group.add(rail);
   });
 
-  // Heavy Tunnel Entrance Portal Headwall at z = +8.6 (raised beam clears Jetpack camera cleanly)
+  // Heavy Tunnel Entrance Portal Headwall at z = +8.6 (raised beam clears Jetpack camera cleanly!)
   [-4.5, 4.5].forEach((px) => {
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.7, 9.8, 0.7), timberMat);
-    post.position.set(px, 4.9, 8.6);
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.7, 12.0, 0.7), timberMat);
+    post.position.set(px, 6.0, 8.6);
     group.add(post);
   });
   const portalHeadwall = new THREE.Mesh(
     new THREE.BoxGeometry(11.6, 4.4, 2.2),
     wallMat,
   );
-  portalHeadwall.position.set(0, 11.9, 8.6);
+  portalHeadwall.position.set(0, 14.1, 8.6);
   group.add(portalHeadwall);
 
   const portalBeam = new THREE.Mesh(new THREE.BoxGeometry(10.2, 0.8, 0.85), timberMat);
-  portalBeam.position.set(0, 9.7, 8.9);
+  portalBeam.position.set(0, 11.9, 8.9);
   group.add(portalBeam);
 
   [-3.8, 0, 3.8].forEach((lx) => {
@@ -3538,13 +3759,13 @@ export function createTunnelDescentModel(
       new THREE.SphereGeometry(0.28, 8, 8),
       new THREE.MeshBasicMaterial({ color: 0xf59e0b }),
     );
-    lamp.position.set(lx, 8.45, 9.0);
+    lamp.position.set(lx, 10.65, 9.0);
     group.add(lamp);
   });
 
   // Sloped earth roof closing smoothly down toward the underground tunnel ceiling
   const tunnelCeiling = new THREE.Mesh(
-    new THREE.CylinderGeometry(7.2, 7.2, 20.2, 12, 1, true, -Math.PI * 0.56, Math.PI * 1.12),
+    new THREE.CylinderGeometry(8.6, 8.6, 20.2, 12, 1, true, -Math.PI * 0.56, Math.PI * 1.12),
     new THREE.MeshStandardMaterial({
       map: earthWallTexture,
       color: 0x9c7354,
@@ -3553,7 +3774,7 @@ export function createTunnelDescentModel(
     }),
   );
   tunnelCeiling.rotation.x = -Math.PI / 2 - slopeAngle;
-  tunnelCeiling.position.set(0, 0.9, 0);
+  tunnelCeiling.position.set(0, 1.95, 0);
   group.add(tunnelCeiling);
 
   return bakeStaticGroup(group, {
@@ -3609,8 +3830,8 @@ export function createTunnelStaircaseExitModel(
 
   // Flanking earth tunnel exit walls, wooden handrails & glowing blue arctic daylight lamps
   [-1, 1].forEach((side) => {
-    const sideWall = new THREE.Mesh(new THREE.BoxGeometry(3.6, 12.5, 20.2), wallMat);
-    sideWall.position.set(side * 5.7, 1.9, 0);
+    const sideWall = new THREE.Mesh(new THREE.BoxGeometry(3.6, 14.5, 20.2), wallMat);
+    sideWall.position.set(side * 5.7, 2.9, 0);
     group.add(sideWall);
 
     const handrail = new THREE.Mesh(
@@ -3640,12 +3861,12 @@ export function createTunnelStaircaseExitModel(
 
   // Top Exit Arch opening cleanly into the next biome (clears Jetpack camera!)
   [-4.4, 4.4].forEach((px) => {
-    const col = new THREE.Mesh(new THREE.BoxGeometry(0.65, 9.8, 0.65), woodMat);
-    col.position.set(px, 4.9, -9.0);
+    const col = new THREE.Mesh(new THREE.BoxGeometry(0.65, 12.0, 0.65), woodMat);
+    col.position.set(px, 6.0, -9.0);
     group.add(col);
   });
   const exitBeam = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.72, 0.75), woodMat);
-  exitBeam.position.set(0, 9.7, -9.0);
+  exitBeam.position.set(0, 11.9, -9.0);
   group.add(exitBeam);
 
   return bakeStaticGroup(group, {
@@ -3687,15 +3908,7 @@ export function createIceWorldSegmentProps(segIndex: number): THREE.Group {
     color: 0x065f46,
     roughness: 0.88,
   });
-  const glacierMat = new THREE.MeshStandardMaterial({
-    color: 0x38bdf8,
-    emissive: 0x0369a1,
-    emissiveIntensity: 0.32,
-    roughness: 0.1,
-    metalness: 0.22,
-    transparent: true,
-    opacity: 0.88,
-  });
+  const { glacierMat, auroraGreenMat, auroraCyanMat, auroraVioletMat } = getIceWorldSharedMats();
 
   addLaneStripes(group, 0x0284c7, 0.48);
 
@@ -3711,11 +3924,13 @@ export function createIceWorldSegmentProps(segIndex: number): THREE.Group {
     // Towering jagged translucent glacier crystal cluster
     const gHeight = 8.2 + ((segIndex + idx) % 4) * 2.1;
     const spire = new THREE.Mesh(new THREE.ConeGeometry(2.4, gHeight, 5), glacierMat);
+    spire.userData.sharedMaterial = true;
     spire.position.set(side * 7.6, gHeight * 0.44, -2.5);
     spire.rotation.y = segIndex * 0.8 + idx;
     group.add(spire);
 
     const subSpire = new THREE.Mesh(new THREE.ConeGeometry(1.3, gHeight * 0.58, 5), glacierMat);
+    subSpire.userData.sharedMaterial = true;
     subSpire.position.set(side * 6.1, gHeight * 0.25, -0.6);
     subSpire.rotation.z = side * 0.22;
     group.add(subSpire);
@@ -3795,6 +4010,7 @@ export function createIceWorldSegmentProps(segIndex: number): THREE.Group {
       group.add(plinth);
 
       const crystal = new THREE.Mesh(new THREE.OctahedronGeometry(0.9, 0), glacierMat);
+      crystal.userData.sharedMaterial = true;
       crystal.scale.set(0.85, 1.9, 0.85);
       crystal.position.set(tx, 2.75, tz);
       group.add(crystal);
@@ -3846,6 +4062,7 @@ export function createIceWorldSegmentProps(segIndex: number): THREE.Group {
     [-7.2, -1.2, 4.8].forEach((sz, sIdx) => {
       const shardH = 0.72 + ((segIndex + sIdx) % 2) * 0.38;
       const curbShard = new THREE.Mesh(new THREE.ConeGeometry(0.32, shardH, 5), glacierMat);
+      curbShard.userData.sharedMaterial = true;
       curbShard.position.set(side * 4.22, shardH * 0.45, sz);
       curbShard.rotation.z = -side * 0.18;
       group.add(curbShard);
@@ -3856,23 +4073,17 @@ export function createIceWorldSegmentProps(segIndex: number): THREE.Group {
   if (variant === 1 || variant === 3) {
     const auroraGreen = new THREE.Mesh(
       new THREE.TorusGeometry(6.8, 0.28, 8, 24, Math.PI),
-      new THREE.MeshBasicMaterial({
-        color: variant === 1 ? 0x34d399 : 0x38bdf8,
-        transparent: true,
-        opacity: 0.48,
-      }),
+      variant === 1 ? auroraGreenMat : auroraCyanMat,
     );
+    auroraGreen.userData.sharedMaterial = true;
     auroraGreen.position.set(0, 8.4, 0);
     group.add(auroraGreen);
 
     const auroraViolet = new THREE.Mesh(
       new THREE.TorusGeometry(7.35, 0.22, 8, 24, Math.PI),
-      new THREE.MeshBasicMaterial({
-        color: 0xa78bfa,
-        transparent: true,
-        opacity: 0.36,
-      }),
+      auroraVioletMat,
     );
+    auroraViolet.userData.sharedMaterial = true;
     auroraViolet.position.set(0, 8.6, -1.8);
     group.add(auroraViolet);
   } else if (variant === 2) {
@@ -3882,6 +4093,7 @@ export function createIceWorldSegmentProps(segIndex: number): THREE.Group {
       group.add(col);
     });
     const bridge = new THREE.Mesh(new THREE.BoxGeometry(11.8, 0.55, 0.85), glacierMat);
+    bridge.userData.sharedMaterial = true;
     bridge.position.set(0, 14.3, 0);
     group.add(bridge);
   }
@@ -4081,57 +4293,98 @@ function addRampChevrons(group: THREE.Group, chevronColor: number): void {
   });
 }
 
+export const CAVE_TRAIN_ROOF_Y = 3.45;
+export const CAVE_TRAIN_HALF_DEPTH = 7.56;
+
 export function createEarthRampModel(): THREE.Group {
-  // Timber mine trestle bridge & plank ramp with glowing cave lanterns
+  // Sleek Subway Surfers industrial steel train boarding ramp (z = +3.15 ground toe -> z = -2.20 top at y = 3.45m, flush roof tongue ending at -2.74 against cab brow)
   const group = new THREE.Group();
-  const timberMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.82 });
-  const plankMat = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.68 });
-  const ironMat = new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.72, roughness: 0.35 });
-  const glowMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24 });
+  const H = CAVE_TRAIN_ROOF_Y;
+  const frontZ = 3.15;
+  const topZ = -2.2;
+  const lipEndZ = -2.74;
+  const slopeRun = frontZ - topZ; // 5.35m
+  const slopeCenterZ = (frontZ + topZ) * 0.5; // +0.475m
+  const slopeLen = Math.hypot(slopeRun, H);
+  const slopeAngle = Math.atan2(H, slopeRun);
 
-  // Side timber trestle frames (z = -3.6 .. +1.4, top y = 1.95)
-  [-0.95, 0.95].forEach((px) => {
-    [-3.1, -1.1, 0.9].forEach((pz) => {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.24, 1.88, 0.24), timberMat);
-      post.position.set(px, 0.94, pz);
-      group.add(post);
+  const frameMat = new THREE.MeshStandardMaterial({
+    color: 0x1e293b,
+    metalness: 0.72,
+    roughness: 0.34,
+  });
+  const deckMat = new THREE.MeshStandardMaterial({
+    color: 0x475569,
+    metalness: 0.55,
+    roughness: 0.44,
+  });
+  const hazardMat = new THREE.MeshStandardMaterial({
+    color: 0xf59e0b,
+    emissive: 0xd97706,
+    emissiveIntensity: 0.35,
+    roughness: 0.4,
+  });
+  const glowMat = new THREE.MeshBasicMaterial({ color: 0xfef08a });
+
+  // Angled steel side stringers & rear support posts stopping cleanly at z = -2.28 (clear of cab nose/headlights at -2.50)
+  [-1.08, 1.08].forEach((sx) => {
+    const stringer = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.3, slopeLen), frameMat);
+    stringer.position.set(sx, H * 0.5 - 0.04, slopeCenterZ);
+    stringer.rotation.x = slopeAngle;
+    group.add(stringer);
+
+    const yellowEdge = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.14, slopeLen + 0.04), hazardMat);
+    yellowEdge.position.set(sx, H * 0.5 + 0.12, slopeCenterZ);
+    yellowEdge.rotation.x = slopeAngle;
+    group.add(yellowEdge);
+
+    const rearPost = new THREE.Mesh(new THREE.BoxGeometry(0.22, H - 0.18, 0.24), frameMat);
+    rearPost.position.set(sx, (H - 0.18) * 0.5, topZ + 0.04);
+    group.add(rearPost);
+
+    const midPost = new THREE.Mesh(new THREE.BoxGeometry(0.18, H * 0.48, 0.2), frameMat);
+    midPost.position.set(sx, H * 0.24, slopeCenterZ);
+    group.add(midPost);
+
+    const topBeacon = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.16, 0.26), glowMat);
+    topBeacon.position.set(sx, H + 0.16, topZ + 0.04);
+    group.add(topBeacon);
+  });
+
+  // Cross brace & under-deck industrial rib
+  const rearBrace = new THREE.Mesh(new THREE.BoxGeometry(2.04, 0.28, 0.24), frameMat);
+  rearBrace.position.set(0, H * 0.55, topZ + 0.04);
+  group.add(rearBrace);
+
+  // Main brushed steel boarding deck
+  const rampDeck = new THREE.Mesh(new THREE.BoxGeometry(2.14, 0.16, slopeLen), deckMat);
+  rampDeck.position.set(0, H * 0.5 - 0.05, slopeCenterZ);
+  rampDeck.rotation.x = slopeAngle;
+  group.add(rampDeck);
+
+  // Flush top steel bridge tongue at roof level ending at z = -2.74 to meet the cab roof brow edge-to-edge above the lower bumper
+  const lipTotalLen = topZ - lipEndZ + 0.1; // 0.64m (-2.10 .. -2.74)
+  const topLip = new THREE.Mesh(new THREE.BoxGeometry(2.14, 0.12, lipTotalLen), deckMat);
+  topLip.position.set(0, H - 0.05, lipEndZ + lipTotalLen * 0.5);
+  group.add(topLip);
+
+  const lipTrim = new THREE.Mesh(new THREE.BoxGeometry(2.18, 0.08, 0.1), hazardMat);
+  lipTrim.position.set(0, H + 0.01, lipEndZ + 0.05);
+  group.add(lipTrim);
+
+  // 4 bright amber directional chevron strips guiding the player smoothly up onto the train roof
+  [-1.35, -0.15, 1.05, 2.25].forEach((cz) => {
+    const t = (frontZ - cz) / slopeRun;
+    const yBase = t * H + 0.04;
+    [-0.36, 0.36].forEach((cx, sideIdx) => {
+      const wing = new THREE.Mesh(new THREE.BoxGeometry(0.76, 0.06, 0.18), glowMat);
+      wing.position.set(cx, yBase, cz);
+      wing.rotation.x = slopeAngle;
+      wing.rotation.y = sideIdx === 0 ? 0.34 : -0.34;
+      group.add(wing);
     });
-    const topRail = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.2, 5.0), timberMat);
-    topRail.position.set(px, 1.98, -1.1);
-    group.add(topRail);
-  });
-  // Core rocky fill inside trestle
-  const fill = new THREE.Mesh(new THREE.BoxGeometry(1.85, 1.78, 4.9), ironMat);
-  fill.position.set(0, 0.89, -1.1);
-  group.add(fill);
-
-  // Wooden deck planks along roof (y = 1.95)
-  for (let i = 0; i < 8; i++) {
-    const plank = new THREE.Mesh(new THREE.BoxGeometry(2.14, 0.12, 0.56), plankMat);
-    plank.position.set(0, 1.9, -3.3 + i * 0.62);
-    group.add(plank);
-  }
-
-  // Front timber ramp z = +3.8 (y=0) -> z = +1.4 (y=1.95)
-  const rampLen = Math.hypot(2.4, 1.95);
-  const rampAngle = Math.atan2(1.95, 2.4);
-  const rampPlank = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.16, rampLen), plankMat);
-  rampPlank.position.set(0, 1.95 * 0.5 - 0.04, 2.6);
-  rampPlank.rotation.x = rampAngle;
-  group.add(rampPlank);
-
-  [-0.96, 0.96].forEach((rx) => {
-    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.22, rampLen), timberMat);
-    rail.position.set(rx, 1.95 * 0.5 + 0.08, 2.6);
-    rail.rotation.x = rampAngle;
-    group.add(rail);
-
-    const lantern = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 6), glowMat);
-    lantern.position.set(rx, 2.22, 1.3);
-    group.add(lantern);
   });
 
-  addRampChevrons(group, 0xfbbf24);
   return bakeStaticGroup(group, { castShadow: true, receiveShadow: true });
 }
 
@@ -4319,6 +4572,278 @@ export function createMovingMineCartModel(): THREE.Group {
   });
   baked.userData.wheels = wheels;
   return baked;
+}
+
+const CAVE_TRAIN_GLB_URL = '/models/yeralti_tren.glb';
+const CAVE_CAR_LENGTH = 7.4;
+const CAVE_CAR_GAP = 0.32;
+const CAVE_TRAIN_WIDTH = 2.42;
+const CAVE_TRAIN_HEIGHT = CAVE_TRAIN_ROOF_Y;
+
+let caveTrainTemplate: THREE.Group | null = null;
+let caveTrainLoadPromise: Promise<THREE.Group | null> | null = null;
+let caveTrainGlowTexture: THREE.CanvasTexture | null = null;
+let caveTrainHeadlightShared: {
+  lensGeo: THREE.BufferGeometry;
+  lensMat: THREE.Material;
+  parkedLensMat: THREE.Material;
+  haloGeo: THREE.BufferGeometry;
+  haloMat: THREE.Material;
+  beaconGeo: THREE.BufferGeometry;
+  beaconMat: THREE.Material;
+  parkedBeaconMat: THREE.Material;
+  cornerLampGeo: THREE.BufferGeometry;
+  tailGeo: THREE.BufferGeometry;
+  tailMat: THREE.Material;
+  couplerGeo: THREE.BufferGeometry;
+  couplerMat: THREE.Material;
+  coneGeo: THREE.BufferGeometry;
+  coneMat: THREE.Material;
+  poolGeo: THREE.BufferGeometry;
+  movingPoolMat: THREE.Material;
+  parkedPoolMat: THREE.Material;
+} | null = null;
+
+function getCaveTrainGlowTexture(): THREE.CanvasTexture {
+  if (caveTrainGlowTexture) return caveTrainGlowTexture;
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    const grad = ctx.createRadialGradient(64, 64, 3, 64, 64, 62);
+    grad.addColorStop(0, 'rgba(255, 255, 240, 1)');
+    grad.addColorStop(0.28, 'rgba(254, 240, 138, 0.86)');
+    grad.addColorStop(0.65, 'rgba(245, 158, 11, 0.32)');
+    grad.addColorStop(1, 'rgba(245, 158, 11, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 128, 128);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.needsUpdate = true;
+  caveTrainGlowTexture = tex;
+  return tex;
+}
+
+function getCaveTrainHeadlightResources() {
+  if (caveTrainHeadlightShared) return caveTrainHeadlightShared;
+  const glowTex = getCaveTrainGlowTexture();
+  caveTrainHeadlightShared = {
+    lensGeo: new THREE.SphereGeometry(0.18, 10, 8),
+    lensMat: new THREE.MeshBasicMaterial({ color: 0xffffff }),
+    parkedLensMat: new THREE.MeshBasicMaterial({ color: 0xfde047 }),
+    haloGeo: new THREE.PlaneGeometry(1.18, 1.18),
+    haloMat: new THREE.MeshBasicMaterial({
+      map: glowTex,
+      transparent: true,
+      opacity: 0.92,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+    beaconGeo: new THREE.BoxGeometry(0.76, 0.2, 0.08),
+    beaconMat: new THREE.MeshBasicMaterial({ color: 0xfef08a }),
+    parkedBeaconMat: new THREE.MeshBasicMaterial({ color: 0x92400e }),
+    cornerLampGeo: new THREE.BoxGeometry(0.18, 0.12, 0.08),
+    tailGeo: new THREE.BoxGeometry(0.22, 0.18, 0.08),
+    tailMat: new THREE.MeshBasicMaterial({ color: 0xef4444 }),
+    couplerGeo: new THREE.BoxGeometry(1.94, 2.52, 0.78),
+    couplerMat: new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      roughness: 0.85,
+      metalness: 0.2,
+    }),
+    coneGeo: new THREE.ConeGeometry(1.42, 10.6, 14, 1, true),
+    coneMat: new THREE.MeshBasicMaterial({
+      color: 0xfef08a,
+      transparent: true,
+      opacity: 0.2,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+    poolGeo: new THREE.PlaneGeometry(3.2, 11.4),
+    movingPoolMat: new THREE.MeshBasicMaterial({
+      map: glowTex,
+      transparent: true,
+      opacity: 0.78,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+    parkedPoolMat: new THREE.MeshBasicMaterial({
+      map: glowTex,
+      transparent: true,
+      opacity: 0.2,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  };
+  return caveTrainHeadlightShared;
+}
+
+export function isCaveTrainModelReady(): boolean {
+  return caveTrainTemplate !== null;
+}
+
+export function preloadCaveTrainModel(): Promise<THREE.Group | null> {
+  if (caveTrainTemplate) return Promise.resolve(caveTrainTemplate);
+  if (caveTrainLoadPromise) return caveTrainLoadPromise;
+
+  const loader = new GLTFLoader();
+  caveTrainLoadPromise = new Promise<THREE.Group | null>((resolve) => {
+    loader.load(
+      CAVE_TRAIN_GLB_URL,
+      (gltf) => {
+        const raw = gltf.scene;
+        const holder = new THREE.Group();
+        const scalePivot = new THREE.Group();
+        // Raw Meshy train is oriented along local +X; rotate inside scalePivot so non-uniform world sx/sy/sz scale matches Z-aligned dimensions cleanly.
+        raw.rotation.y = -Math.PI / 2;
+        scalePivot.add(raw);
+        holder.add(scalePivot);
+        holder.updateMatrixWorld(true);
+
+        const box = new THREE.Box3().setFromObject(holder);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+
+        const sx = size.x > 0.1 ? CAVE_TRAIN_WIDTH / size.x : 1;
+        const sy = size.y > 0.1 ? (CAVE_TRAIN_HEIGHT - 0.065) / size.y : 1;
+        const sz = size.z > 0.1 ? CAVE_CAR_LENGTH / size.z : 1;
+        scalePivot.scale.set(sx, sy, sz);
+        holder.updateMatrixWorld(true);
+
+        const scaledBox = new THREE.Box3().setFromObject(holder);
+        const scaledCenter = new THREE.Vector3();
+        scaledBox.getCenter(scaledCenter);
+        // Sit wheels cleanly atop the steel rail cap (y = 0.065 -> exact roof at CAVE_TRAIN_ROOF_Y)
+        scalePivot.position.x -= scaledCenter.x;
+        scalePivot.position.z -= scaledCenter.z;
+        scalePivot.position.y += 0.065 - scaledBox.min.y;
+
+        holder.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            obj.castShadow = false;
+            obj.receiveShadow = true;
+            obj.userData.sharedAsset = true;
+            obj.userData.sharedGeometry = true;
+            obj.userData.sharedMaterial = true;
+          }
+        });
+
+        caveTrainTemplate = holder;
+        resolve(holder);
+      },
+      undefined,
+      () => {
+        caveTrainLoadPromise = null;
+        resolve(null);
+      },
+    );
+  });
+  return caveTrainLoadPromise;
+}
+
+export function createCaveTrainModel(isMoving: boolean): THREE.Group {
+  if (!caveTrainTemplate) {
+    void preloadCaveTrainModel();
+    return new THREE.Group();
+  }
+
+  const group = new THREE.Group();
+  const hullGroup = new THREE.Group();
+  const carOffsetZ = (CAVE_CAR_LENGTH + CAVE_CAR_GAP) * 0.5;
+  const frontZ = carOffsetZ + CAVE_CAR_LENGTH * 0.5; // 7.56m
+
+  const frontCar = caveTrainTemplate.clone();
+  frontCar.position.z = carOffsetZ;
+  const rearCar = caveTrainTemplate.clone();
+  rearCar.rotation.y = Math.PI;
+  rearCar.position.z = -carOffsetZ;
+
+  [frontCar, rearCar].forEach((car) => {
+    car.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.userData.sharedAsset = true;
+        obj.userData.sharedGeometry = true;
+        obj.userData.sharedMaterial = true;
+      }
+    });
+    hullGroup.add(car);
+  });
+
+  const hl = getCaveTrainHeadlightResources();
+  const markSharedLight = (mesh: THREE.Mesh) => {
+    mesh.userData.sharedGeometry = true;
+    mesh.userData.sharedMaterial = true;
+    return mesh;
+  };
+
+  // Rubber gangway bellows connecting the 2 metro cars cleanly
+  const coupler = markSharedLight(new THREE.Mesh(hl.couplerGeo, hl.couplerMat));
+  coupler.position.set(0, 1.92, 0);
+  hullGroup.add(coupler);
+
+  group.add(hullGroup);
+  group.userData.trainHull = hullGroup;
+
+  // Front cab route beacon & corner marker lights aligned to the recessed cab brow
+  const beacon = markSharedLight(
+    new THREE.Mesh(hl.beaconGeo, isMoving ? hl.beaconMat : hl.parkedBeaconMat),
+  );
+  beacon.position.set(0, CAVE_TRAIN_HEIGHT - 0.26, frontZ - 0.24);
+  group.add(beacon);
+
+  [-0.88, 0.88].forEach((cx) => {
+    const corner = markSharedLight(
+      new THREE.Mesh(hl.cornerLampGeo, isMoving ? hl.beaconMat : hl.parkedBeaconMat),
+    );
+    corner.position.set(cx, CAVE_TRAIN_HEIGHT - 0.26, frontZ - 0.26);
+    group.add(corner);
+  });
+
+  // Twin headlights mounted cleanly on the front cab face + rear red tail lights
+  [-0.6, 0.6].forEach((hx) => {
+    const lens = markSharedLight(
+      new THREE.Mesh(hl.lensGeo, isMoving ? hl.lensMat : hl.parkedLensMat),
+    );
+    lens.position.set(hx, 1.54, frontZ - 0.14);
+    group.add(lens);
+
+    if (isMoving) {
+      const halo = markSharedLight(new THREE.Mesh(hl.haloGeo, hl.haloMat));
+      halo.position.set(hx, 1.54, frontZ - 0.02);
+      group.add(halo);
+    }
+
+    const tail = markSharedLight(new THREE.Mesh(hl.tailGeo, hl.tailMat));
+    tail.position.set(hx, 1.54, -frontZ + 0.14);
+    group.add(tail);
+  });
+
+  if (isMoving) {
+    const beamRig = new THREE.Group();
+    [-0.56, 0.56].forEach((hx) => {
+      const cone = markSharedLight(new THREE.Mesh(hl.coneGeo, hl.coneMat));
+      cone.rotation.x = -Math.PI / 2 - 0.075;
+      cone.position.set(hx, 0.96, frontZ + 5.1);
+      beamRig.add(cone);
+    });
+    const groundPool = markSharedLight(new THREE.Mesh(hl.poolGeo, hl.movingPoolMat));
+    groundPool.rotation.x = -Math.PI / 2;
+    groundPool.position.set(0, 0.115, frontZ + 5.4);
+    beamRig.add(groundPool);
+    group.add(beamRig);
+    group.userData.headlightRig = beamRig;
+  } else {
+    const parkedPool = markSharedLight(new THREE.Mesh(hl.poolGeo, hl.parkedPoolMat));
+    parkedPool.rotation.x = -Math.PI / 2;
+    parkedPool.scale.set(0.75, 0.35, 1);
+    parkedPool.position.set(0, 0.115, frontZ + 1.4);
+    group.add(parkedPool);
+  }
+
+  return group;
 }
 
 export function createEarthBoulderModel(): THREE.Group {
@@ -5294,29 +5819,8 @@ export function createBathSegmentProps(
   const coldCapMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.25 });
   const vanityGlowMat = new THREE.MeshBasicMaterial({ color: 0xfef9c3 });
   const aquaLedMat = new THREE.MeshBasicMaterial({ color: 0xa5f3fc });
-  const waterStreamMat = new THREE.MeshStandardMaterial({
-    color: 0x67e8f9,
-    emissive: 0x06b6d4,
-    emissiveIntensity: 0.25,
-    transparent: true,
-    opacity: 0.62,
-    roughness: 0.08,
-  });
-  const curtainMat = new THREE.MeshStandardMaterial({
-    color: segIndex % 2 === 0 ? 0x67e8f9 : 0xfbcfe8,
-    transparent: true,
-    opacity: 0.72,
-    roughness: 0.55,
-    side: THREE.DoubleSide,
-  });
-  const bubbleMat = new THREE.MeshStandardMaterial({
-    color: 0xe0f2fe,
-    emissive: 0x38bdf8,
-    emissiveIntensity: 0.28,
-    transparent: true,
-    opacity: 0.52,
-    roughness: 0.08,
-  });
+  const { waterStreamMat, curtainAquaMat, curtainPinkMat, bubbleMat } = getBathSharedTransMats();
+  const curtainMat = segIndex % 2 === 0 ? curtainAquaMat : curtainPinkMat;
 
   const baseVariant = segIndex % 4;
 
@@ -5461,6 +5965,7 @@ export function createBathSegmentProps(
         new THREE.CylinderGeometry(0.24, 0.44, 4.25, 10),
         waterStreamMat,
       );
+      stream.userData.sharedMaterial = true;
       stream.position.set(fx - side * 2.1, 1.98, fz);
       group.add(stream);
 
@@ -5585,6 +6090,7 @@ export function createBathSegmentProps(
         new THREE.CylinderGeometry(0.98, 0.98, 0.16, 14),
         waterStreamMat,
       );
+      drumSuds.userData.sharedMaterial = true;
       drumSuds.rotation.z = Math.PI / 2;
       drumSuds.position.set(wx - side * 1.56, 1.98, wz);
       group.add(drumSuds);
@@ -5647,6 +6153,7 @@ export function createBathSegmentProps(
         new THREE.SphereGeometry(0.62 + bi * 0.18, 10, 8),
         bubbleMat,
       );
+      bubble.userData.sharedMaterial = true;
       bubble.position.set(
         side * (5.25 + (bi % 2) * 1.35),
         by,
@@ -5678,6 +6185,7 @@ export function createBathSegmentProps(
         new THREE.CylinderGeometry(0.55, 0.72, 4.9, 8, 1, true),
         curtainMat,
       );
+      curtainDrape.userData.sharedMaterial = true;
       curtainDrape.position.set(side * 5.0, 11.7, 6.2);
       group.add(curtainDrape);
     }
@@ -5761,13 +6269,7 @@ export function createLabSegmentProps(
     emissiveIntensity: 0.55,
     roughness: 0.45,
   });
-  const glassMat = new THREE.MeshStandardMaterial({
-    color: 0xdcfce7,
-    transparent: true,
-    opacity: 0.36,
-    roughness: 0.08,
-    metalness: 0.12,
-  });
+  const glassMat = getLabSharedGlassMat();
 
   const variant = segIndex % 4;
 
@@ -5793,6 +6295,7 @@ export function createLabSegmentProps(
         new THREE.CylinderGeometry(0.54, 1.72, 3.0, 12),
         glassMat,
       );
+      glassCone.userData.sharedMaterial = true;
       glassCone.position.set(fx, 2.7, fz);
       group.add(glassCone);
 
@@ -5800,10 +6303,12 @@ export function createLabSegmentProps(
         new THREE.CylinderGeometry(0.54, 0.54, 1.25, 10),
         glassMat,
       );
+      glassNeck.userData.sharedMaterial = true;
       glassNeck.position.set(fx, 4.8, fz);
       group.add(glassNeck);
 
       const neckLip = new THREE.Mesh(new THREE.TorusGeometry(0.58, 0.1, 6, 12), glassMat);
+      neckLip.userData.sharedMaterial = true;
       neckLip.rotation.x = Math.PI / 2;
       neckLip.position.set(fx, 5.42, fz);
       group.add(neckLip);
@@ -5850,6 +6355,7 @@ export function createLabSegmentProps(
       group.add(ringRod);
 
       const glassBulb = new THREE.Mesh(new THREE.SphereGeometry(1.5, 12, 10), glassMat);
+      glassBulb.userData.sharedMaterial = true;
       glassBulb.position.set(fx, 2.85, fz);
       group.add(glassBulb);
 
@@ -5861,6 +6367,7 @@ export function createLabSegmentProps(
       group.add(reagentBulb);
 
       const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.52, 1.5, 10), glassMat);
+      neck.userData.sharedMaterial = true;
       neck.position.set(fx, 4.85, fz);
       group.add(neck);
 
@@ -5928,6 +6435,7 @@ export function createLabSegmentProps(
       const tz = rackZ - 1.05 + t * 0.7;
       const tMat = liquidPalette[(segIndex + t + idx) % liquidPalette.length];
       const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 2.0, 8), glassMat);
+      tube.userData.sharedMaterial = true;
       tube.position.set(rackX, 2.45, tz);
       group.add(tube);
 
@@ -6010,11 +6518,7 @@ export function createSpaceSegmentProps(segIndex: number): THREE.Group {
     color: 0xb45309,
     roughness: 0.72,
   });
-  const ringMat = new THREE.MeshBasicMaterial({
-    color: 0xe879f9,
-    transparent: true,
-    opacity: 0.65,
-  });
+  const { ringMat, domeMat } = getSpaceSharedTransMats();
   const cyanMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
   const hullMat = new THREE.MeshStandardMaterial({
     color: 0x64748b,
@@ -6025,12 +6529,6 @@ export function createSpaceSegmentProps(segIndex: number): THREE.Group {
     color: 0x1d4ed8,
     metalness: 0.6,
     roughness: 0.2,
-  });
-  const domeMat = new THREE.MeshStandardMaterial({
-    color: 0x86efac,
-    transparent: true,
-    opacity: 0.62,
-    roughness: 0.1,
   });
 
   const variant = segIndex % 4;
@@ -6069,6 +6567,7 @@ export function createSpaceSegmentProps(segIndex: number): THREE.Group {
     const subV = (variant + idx) % 4;
     if (subV === 0) {
       const saturnRing = new THREE.Mesh(new THREE.TorusGeometry(pRadius + 1.1, 0.16, 8, 24), ringMat);
+      saturnRing.userData.sharedMaterial = true;
       saturnRing.rotation.x = Math.PI / 2.6;
       saturnRing.position.set(px, py, pz);
       group.add(saturnRing);
@@ -6088,6 +6587,7 @@ export function createSpaceSegmentProps(segIndex: number): THREE.Group {
         new THREE.SphereGeometry(0.85, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.52),
         domeMat,
       );
+      cockpit.userData.sharedMaterial = true;
       cockpit.position.y = 0.18;
       ufoGroup.add(cockpit);
 
@@ -6132,6 +6632,7 @@ export function createSpaceSegmentProps(segIndex: number): THREE.Group {
     } else {
       // Twin Cosmic Crystal Nebula Monolith flanking track
       const monolith = new THREE.Mesh(new THREE.OctahedronGeometry(1.15, 0), ringMat);
+      monolith.userData.sharedMaterial = true;
       monolith.scale.set(0.85, 1.9, 0.85);
       monolith.position.set(side * 6.8, 4.4, 2.5);
       group.add(monolith);
@@ -6168,6 +6669,7 @@ export function createSpaceSegmentProps(segIndex: number): THREE.Group {
       new THREE.OctahedronGeometry(0.55, 0),
       idx === 0 ? cyanMat : ringMat,
     );
+    if (idx !== 0) starCluster.userData.sharedMaterial = true;
     starCluster.position.set(side * 11.4, 7.6 + (segIndex % 3) * 0.9, idx === 0 ? 5.2 : -5.2);
     group.add(starCluster);
   });
@@ -6175,6 +6677,7 @@ export function createSpaceSegmentProps(segIndex: number): THREE.Group {
   // High cosmic Warp Gate Ring (apex 14.4m -> clears Jetpack cleanly!)
   if (variant === 0 || variant === 2) {
     const warpRing = new THREE.Mesh(new THREE.TorusGeometry(6.4, 0.22, 8, 28, Math.PI), ringMat);
+    warpRing.userData.sharedMaterial = true;
     warpRing.position.set(0, 8.0, 0);
     group.add(warpRing);
 
@@ -7115,6 +7618,79 @@ export function disposeModelsModuleSingletons(): void {
   if (sharedSimitMat) {
     sharedSimitMat.dispose();
     sharedSimitMat = null;
+  }
+  if (caveTrainTemplate) {
+    caveTrainTemplate.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.geometry?.dispose();
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) {
+          if (m) {
+            const std = m as THREE.MeshStandardMaterial;
+            std.map?.dispose();
+            std.normalMap?.dispose();
+            std.roughnessMap?.dispose();
+            std.metalnessMap?.dispose();
+            m.dispose();
+          }
+        }
+      }
+    });
+    caveTrainTemplate = null;
+    caveTrainLoadPromise = null;
+  }
+  if (caveTrainHeadlightShared) {
+    caveTrainHeadlightShared.lensGeo.dispose();
+    caveTrainHeadlightShared.lensMat.dispose();
+    caveTrainHeadlightShared.parkedLensMat.dispose();
+    caveTrainHeadlightShared.haloGeo.dispose();
+    caveTrainHeadlightShared.haloMat.dispose();
+    caveTrainHeadlightShared.beaconGeo.dispose();
+    caveTrainHeadlightShared.beaconMat.dispose();
+    caveTrainHeadlightShared.parkedBeaconMat.dispose();
+    caveTrainHeadlightShared.cornerLampGeo.dispose();
+    caveTrainHeadlightShared.tailGeo.dispose();
+    caveTrainHeadlightShared.tailMat.dispose();
+    caveTrainHeadlightShared.couplerGeo.dispose();
+    caveTrainHeadlightShared.couplerMat.dispose();
+    caveTrainHeadlightShared.coneGeo.dispose();
+    caveTrainHeadlightShared.coneMat.dispose();
+    caveTrainHeadlightShared.poolGeo.dispose();
+    caveTrainHeadlightShared.movingPoolMat.dispose();
+    caveTrainHeadlightShared.parkedPoolMat.dispose();
+    caveTrainHeadlightShared = null;
+  }
+  if (caveTrainGlowTexture) {
+    caveTrainGlowTexture.dispose();
+    caveTrainGlowTexture = null;
+  }
+  if (sharedEarthShellMat) {
+    sharedEarthShellMat.dispose();
+    sharedEarthShellMat = null;
+    sharedEarthShellTex = null;
+  }
+  if (sharedIceWorldMats) {
+    sharedIceWorldMats.glacierMat.dispose();
+    sharedIceWorldMats.auroraGreenMat.dispose();
+    sharedIceWorldMats.auroraCyanMat.dispose();
+    sharedIceWorldMats.auroraVioletMat.dispose();
+    sharedIceWorldMats = null;
+  }
+  if (sharedBathTransMats) {
+    sharedBathTransMats.waterStreamMat.dispose();
+    sharedBathTransMats.curtainAquaMat.dispose();
+    sharedBathTransMats.curtainPinkMat.dispose();
+    sharedBathTransMats.bubbleMat.dispose();
+    sharedBathTransMats = null;
+  }
+  if (sharedLabGlassMat) {
+    sharedLabGlassMat.dispose();
+    sharedLabGlassMat = null;
+  }
+  if (sharedSpaceTransMats) {
+    sharedSpaceTransMats.ringMat.dispose();
+    sharedSpaceTransMats.domeMat.dispose();
+    sharedSpaceTransMats = null;
   }
 }
 

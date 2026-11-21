@@ -54,6 +54,13 @@ function patchAndroidManifest(admobAppId) {
     );
   }
 
+  if (!xml.includes('android.permission.ACCESS_NETWORK_STATE')) {
+    xml = xml.replace(
+      /(<manifest\b[^>]*>)/,
+      '$1\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />',
+    );
+  }
+
   if (xml.includes('com.google.android.gms.ads.APPLICATION_ID')) {
     xml = xml.replace(
       /(<meta-data[^>]*android:name="com\.google\.android\.gms\.ads\.APPLICATION_ID"[^>]*android:value=")[^"]*(")/,
@@ -84,6 +91,20 @@ function patchAndroidManifest(admobAppId) {
     xml = xml.replace(
       /(<activity\b[^>]*android:name="[^"]*MainActivity"[^>]*)(>)/,
       '$1\n            android:screenOrientation="portrait"$2',
+    );
+  }
+
+  const desiredConfigChanges =
+    'orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode';
+  if (/android:configChanges="[^"]*"/.test(xml)) {
+    xml = xml.replace(
+      /android:configChanges="[^"]*"/,
+      `android:configChanges="${desiredConfigChanges}"`,
+    );
+  } else {
+    xml = xml.replace(
+      /(<activity\b[^>]*android:name="[^"]*MainActivity"[^>]*)(>)/,
+      `$1\n            android:configChanges="${desiredConfigChanges}"$2`,
     );
   }
 
